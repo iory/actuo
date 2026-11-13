@@ -1,0 +1,41 @@
+# Stable names for the Kondo servo bus adapters, one per board type:
+#
+#   /dev/actuo_kondo_rcb4mini  the RCB-4mini, through Kondo's DUAL USB ADAPTER HS
+#   /dev/actuo_kondo_armh7     the ARM-H7, through its on-board USB-serial bridge
+#
+# /dev/ttyUSB0 is unusable as config: the number moves between boots and with
+# the order things are plugged in. The by-id path is stable but names ONE
+# PHYSICAL CHIP, so a config carrying it only works on the machine it was
+# written on. A robot config names the board type instead
+# (`channel: /dev/actuo_kondo_rcb4mini`), which works on every machine that has
+# run the installer and survives a swapped adapter.
+#
+# One name per board type, not one name for "the Kondo bus": the ARM-H7's
+# bridge is a CH340, a chip that also sits in unrelated devices (lab power
+# supplies, USB-serial cables). With a single shared name, an RCB-4mini robot
+# and a CH340 power supply on one desk would race for it; with two, the worst a
+# stray CH340 can do is take the ARM-H7 name.
+#
+# THE TRADE-OFF that remains: vendor/product is not unique the way a serial
+# number is. Two adapters of one type listed below both claim its name, and the
+# winner is whichever udev processed last. The symptom is a bus that opens fine
+# and answers nothing, so it looks like a dead board rather than a wrong port.
+# The fix belongs in THIS file, which is per-machine, not in the robot config:
+# pin the serial number and comment out the matching line below.
+#
+#   ls -l /dev/serial/by-id/          # find the serial
+#   # Put your adapter's serial number in place of XXXXXXXX:
+#   SUBSYSTEM=="tty", ATTRS{serial}=="XXXXXXXX", SYMLINK+="actuo_kondo_armh7"
+#
+# Adapters that are known to be OTHER buses are deliberately not listed: an
+# FT232H (0403:6014, e.g. a DYNAMIXEL hub) or a CH343 (1a86:55d3, a common
+# USB-TTL for Feetech servos). In an exclusive-name rule, over-matching means
+# the wrong bus wins.
+
+# RCB-4mini: Kondo DUAL USB ADAPTER HS (FTDI-based, ftdi_sio).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="165c", ATTRS{idProduct}=="0008", SYMLINK+="actuo_kondo_rcb4mini"
+
+# ARM-H7: the WCH CH340 bridge on the board, or an FTDI FT232R cable to it.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="actuo_kondo_armh7"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="5523", SYMLINK+="actuo_kondo_armh7"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="actuo_kondo_armh7"

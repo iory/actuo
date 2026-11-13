@@ -1,0 +1,22 @@
+<library path="actuo_rviz_plugins">
+  <class name="actuo_rviz_plugins/ServoPanel"
+         type="actuo_rviz_plugins::ServoPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      Per-joint servo (torque) on/off for an actuo bus servicer. Shows the jump
+      enabling each joint would cause BEFORE the button is pressed, using the
+      would_jump the server precomputed -- the panel never re-derives the safety
+      rule, and never sends force.
+    </description>
+  </class>
+  <class name="actuo_rviz_plugins/DiagnosticsPanel"
+         type="actuo_rviz_plugins::DiagnosticsPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      Read-only view of /diagnostics. Splits each status into publisher and item
+      name, groups rows by the first path segment (bus first), colours
+      OK/WARN/ERROR/STALE distinctly, and marks the whole panel stale when
+      diagnostics stop arriving.
+    </description>
+  </class>
+</library>

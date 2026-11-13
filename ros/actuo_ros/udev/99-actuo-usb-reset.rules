@@ -1,0 +1,12 @@
+# Let members of plugdev reset a wedged USB-serial adapter
+# (actuo.drivers.usb_reset), which otherwise needs root and so never happens
+# automatically. This grants a permission, so listing an adapter that is not a
+# servo bus is harmless.
+SUBSYSTEM=="usb", ATTR{idVendor}=="165c", ATTR{idProduct}=="0008", GROUP="plugdev", MODE="0664"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6001", GROUP="plugdev", MODE="0664"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6014", GROUP="plugdev", MODE="0664"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6015", GROUP="plugdev", MODE="0664"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="7523", GROUP="plugdev", MODE="0664"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="5523", GROUP="plugdev", MODE="0664"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="55d3", GROUP="plugdev", MODE="0664"
+SUBSYSTEM=="usb", ATTR{idVendor}=="1d50", ATTR{idProduct}=="606f", GROUP="plugdev", MODE="0664"

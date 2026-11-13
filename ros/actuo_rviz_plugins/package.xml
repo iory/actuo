@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypelang="RNG" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<package format="3">
+  <name>actuo_rviz_plugins</name>
+  <version>0.0.1</version>
+  <description>
+    RViz 2 panels for an actuo bus servicer: per-joint servo (torque) ON/OFF via
+    the SetServo action, with the jump each joint would make shown before the
+    button, and a read-only /diagnostics view.
+
+    C++ because RViz 2 panels are pluginlib C++ only -- there is no Python panel
+    plugin (which is why comparable tools, e.g. rcb4's kxr_rqt_plugin, are rqt).
+    The panels carry no protocol knowledge: they speak one action and a few
+    topics and know nothing of buses, registers or motors.
+  </description>
+  <maintainer email="ab.ioryz@gmail.com">iory</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>actuo_msgs</depend>
+  <depend>control_msgs</depend>
+  <depend>controller_manager_msgs</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>pluginlib</depend>
+  <depend>qtbase5-dev</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>rviz_common</depend>
+  <depend>trajectory_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <rviz plugin="${prefix}/plugins_description.xml"/>
+  </export>
+</package>

@@ -1,0 +1,27 @@
+# Turn joint torque on or off.
+#
+# An action, not a service, because REFUSAL is the important case: enabling
+# torque while the controller commands a different pose than the robot holds
+# would slam the joint there. That refusal is a goal REJECTION with a reason,
+# which a client cannot ignore as easily as a success=false field.
+#
+# Enabling is refused unless the controller already commands where the robot
+# actually is. The way to satisfy that is to re-sync the CONTROLLER to the robot
+# (deactivate then reactivate the trajectory controller, which adopts the
+# measured pose), never to let the robot leap to the controller.
+
+# Goal
+bool enable                # true = torque on, false = limp
+string[] joints            # empty = every joint
+bool force                 # skip the jump guard. Requires the operator to have
+                           # already made the robot safe; it exists so that an
+                           # override is explicit, logged and greppable, rather
+                           # than someone quietly widening the threshold.
+---
+# Result
+bool ok
+string reason              # why it was refused, or what was done
+JointServoState[] joints    # state at the moment the request settled
+---
+# Feedback
+string stage               # e.g. "checking", "releasing", "enabling"

@@ -1,0 +1,12 @@
+# Generated into the build tree by CMakeLists.txt, which fills in the path.
+#
+# actuo itself, from the checkout this package sits in (ros/actuo_ros is two
+# levels below the repository root), installed editable: the ROS layer always
+# runs the actuo next to it, never another release.
+#
+#   kondo      rcb4.protocol (Kondo RCB-4mini / ARM-H7 wire protocol)
+#   dynamixel  dynamixel-sdk
+#   can        python-can, gs_usb, pyusb
+#   usb        libusb1, for resetting a wedged USB-serial adapter
+#   safety     python-fcl, for a --command-filter that checks self-collision
+-e @ACTUO_ROOT@[kondo,dynamixel,can,usb,safety]

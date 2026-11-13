@@ -1,0 +1,27 @@
+# Exported by actuo_ros: lets another package's venv use the same actuo.
+#
+#   find_package(actuo_ros REQUIRED)
+#   actuo_requirement(ACTUO_REQUIREMENT EXTRAS kondo)
+#   configure_file(requirements.in.in "${CMAKE_CURRENT_BINARY_DIR}/requirements.in" @ONLY)
+#   ament_generate_virtualenv(REQUIREMENTS "${CMAKE_CURRENT_BINARY_DIR}/requirements.in" ...)
+#
+# with a line `@ACTUO_REQUIREMENT@` in requirements.in.in. The requirement is
+# the editable checkout actuo_ros itself was built from, so every venv in the
+# workspace runs the one actuo next to the ROS layer.
+
+#: Root of the actuo checkout actuo_ros was built from.
+set(actuo_ros_ACTUO_ROOT "@ACTUO_ROOT@")
+
+# actuo_requirement(<out_var> [EXTRAS <extra>...])
+#
+# Set <out_var> to the requirements line for that checkout, e.g.
+# "-e /path/to/actuo[kondo,safety]".
+function(actuo_requirement out_var)
+  cmake_parse_arguments(_AR "" "" "EXTRAS" ${ARGN})
+  set(_line "-e ${actuo_ros_ACTUO_ROOT}")
+  if(_AR_EXTRAS)
+    string(REPLACE ";" "," _extras "${_AR_EXTRAS}")
+    set(_line "${_line}[${_extras}]")
+  endif()
+  set(${out_var} "${_line}" PARENT_SCOPE)
+endfunction()

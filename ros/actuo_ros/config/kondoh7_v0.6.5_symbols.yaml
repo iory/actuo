@@ -1,0 +1,22 @@
+firmware_version: v0.6.5
+addresses:
+  Control: 604064512
+  GPIO_vector: 604064936
+  Mfilter: 604064400
+  Sensor_vector: 604066784
+  SysB: 604061336
+  Worm_vector: 604065056
+  buzzer_init_sound: 134222565
+  data_address: 603980348
+  dataflash_to_dataram: 134264061
+  dataram_to_dataflash: 134264097
+  flash_to_rom: 134263625
+  gpio_cmd: 134269229
+  imu_data_: 604064380
+  pump_switch: 134263017
+  rom_to_flash: 134263837
+  servo_idmode_scan: 134250317
+  servo_vector: 604072900
+  valve_switch: 134263073
+source_elf: https://github.com/iory/rcb4/releases/download/v0.6.5.elf/v0.6.5.elf (md5
+  2ec2d0cde4c3d5c5a9da2f705d3c6c50)

@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypelang="RNG" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<package format="3">
+  <name>actuo_hardware</name>
+  <version>0.0.1</version>
+  <description>
+    Thin, motor-agnostic ros2_control SystemInterface. Exchanges flat joint
+    command/state vectors with actuo's Python bus servicer over shared memory.
+  </description>
+  <maintainer email="ab.ioryz@gmail.com">iory</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

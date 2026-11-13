@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "actuo"
+version = "0.0.1"
+description = "One Python layer for Dynamixel, Kondo, Feetech and CAN actuators: batch bus I/O, per-motor models, guarded servo on/off. ROS-free; a ROS 2 layer sits on top."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Iori Yanokura"}]
+dependencies = [
+    "numpy",
+    "pyyaml",
+    "pyserial",
+    # Robot models: URDF joints and limits, kinematics, and the skrobot-style
+    # robot interface. 0.4.14 is the first release with
+    # skrobot.interfaces.base.RobotInterfaceBase and skrobot.interpolation,
+    # which actuo.robot_interface builds on.
+    "scikit-robot>=0.4.14",
+]
+
+[project.optional-dependencies]
+# One extra per vendor; the vendor libraries stay usable on their own.
+# rcb4.protocol (byte-level RCB-4 / ICS protocol) is in rcb4 0.2.0 and later.
+kondo = ["rcb4>=0.2.0"]
+dynamixel = ["dynamixel-sdk"]
+can = ["python-can", "gs_usb", "pyusb"]
+# Recover a wedged usb-serial adapter (actuo.drivers.usb_reset).
+usb = ["libusb1"]
+# xacro for .xacro robot documents.
+xacro = ["xacro"]
+firmware = ["pyelftools"]
+# actuo.safety distance queries and the fast boolean collision path
+# (trimesh collision managers need python-fcl).
+safety = ["python-fcl"]
+all = ["actuo[kondo,dynamixel,can,usb,firmware,safety]"]
+test = ["pytest", "actuo[dynamixel,can,usb]"]   # plus rcb4 (actuo[kondo]) for the Kondo tests
+
+[project.scripts]
+actuo-air = "actuo.cli.air:main"
+actuo-auto-limits = "actuo.cli.auto_limits:main"
+actuo-can-probe = "actuo.cli.can_probe:main"
+actuo-current-push = "actuo.cli.current_push:main"
+actuo-dxl-probe = "actuo.cli.dxl_probe:main"
+actuo-gateway-probe = "actuo.cli.gateway_probe:main"
+actuo-hand-find-limits = "actuo.cli.hand_find_limits:main"
+actuo-hand-pose = "actuo.cli.hand_pose:main"
+actuo-hand-probe = "actuo.cli.hand_probe:main"
+actuo-impact-test = "actuo.cli.impact_test:main"
+actuo-jog-joint = "actuo.cli.jog_joint:main"
+actuo-kondo-import-rcb4 = "actuo.drivers.kondo_import_rcb4:main"
+actuo-kondo-probe = "actuo.cli.kondo_probe:main"
+actuo-kondo-rcb4-emulator = "actuo.cli.kondo_rcb4_emulator:main"
+actuo-kondo-rcb4-probe = "actuo.cli.kondo_rcb4_probe:main"
+actuo-kondo-symbols = "actuo.cli.kondo_symbols:main"
+actuo-maxspeed = "actuo.cli.maxspeed:main"
+actuo-recalibrate = "actuo.cli.recalibrate:main"
+actuo-relay = "actuo.cli.relay:main"
+actuo-set-origin = "actuo.cli.set_origin:main"
+actuo-teach-limits = "actuo.cli.teach_limits:main"
+actuo-uart-relay-emulator = "actuo.cli.uart_relay_emulator:main"
+actuo-uart-relay-ping = "actuo.cli.uart_relay_ping:main"
+actuo-verify-poles = "actuo.cli.verify_poles:main"
+actuo-wheel-calibrate = "actuo.cli.wheel_calibrate:main"
+
+[tool.setuptools.packages.find]
+include = ["actuo*"]
+
+[tool.setuptools.package-data]
+"actuo.drivers" = ["data/*.yaml", "references.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

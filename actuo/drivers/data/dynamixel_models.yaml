@@ -1,0 +1,197 @@
+# DYNAMIXEL model table -- DATA, not code.
+#
+# Supporting a new servo model is a row in `models:` (and, only for a genuinely
+# new control-table layout, a block in `tables:`). No Python changes, ever. That
+# is the whole point: `actuators/dynamixel.py` is model-agnostic and reads this
+# file, so "does actuo support servo X?" is answered by editing YAML.
+#
+# RULES FOR ADDING A ROW -- read before appending
+# -----------------------------------------------
+# 1. Every `source:` is mandatory and must be the ROBOTIS e-Manual page for that
+#    exact model: no register address without a retrievable source. A row without a source is worse than a missing row, because a
+#    missing row fails loudly and a wrong row commands a random register.
+# 2. Never copy a row to a "similar" model. The X-series table is shared, but
+#    resolution, velocity unit and *which modes exist* are not: XL430 and XM430
+#    share every address here and differ in whether current control exists at
+#    all. Guessing that field is how a driver ends up silently unable to do what
+#    it claims.
+# 3. Leave a unit `null` when you have not found its documented value. A null
+#    unit means the driver reports the raw count in `aux` and leaves the
+#    engineering-unit field `None` -- honest and inspectable. A plausible
+#    invented number is not recoverable once it is in a log.
+# 4. The key of a `models:` entry is the Model Number the servo itself reports
+#    at control-table address 0, so `actuo-dxl-probe` can identify hardware
+#    without anyone being asked what is plugged in.
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Control-table layouts. Shared by every model that uses them.
+# ---------------------------------------------------------------------------
+tables:
+
+  protocol1_ax:
+    # AX/RX-series classic table. Protocol 1.0 only -- these servos have no
+    # firmware option that speaks 2.0.
+    protocol: 1
+    source: https://emanual.robotis.com/docs/en/dxl/ax/ax-12a/
+    registers:
+      model_number:        {address: 0,  size: 2}
+      firmware_version:    {address: 2,  size: 1}
+      id:                  {address: 3,  size: 1}
+      baud_rate:           {address: 4,  size: 1}
+      return_delay_time:   {address: 5,  size: 1}
+      cw_angle_limit:      {address: 6,  size: 2}
+      ccw_angle_limit:     {address: 8,  size: 2}
+      temperature_limit:   {address: 11, size: 1}
+      min_voltage_limit:   {address: 12, size: 1}
+      max_voltage_limit:   {address: 13, size: 1}
+      max_torque:          {address: 14, size: 2}
+      status_return_level: {address: 16, size: 1}
+      alarm_led:           {address: 17, size: 1}
+      shutdown:            {address: 18, size: 1}
+      torque_enable:       {address: 24, size: 1}
+      led:                 {address: 25, size: 1}
+      goal_position:       {address: 30, size: 2}
+      moving_speed:        {address: 32, size: 2}
+      torque_limit:        {address: 34, size: 2}
+      present_position:    {address: 36, size: 2}
+      present_velocity:    {address: 38, size: 2}
+      present_load:        {address: 40, size: 2}
+      present_voltage:     {address: 42, size: 1}
+      present_temperature: {address: 43, size: 1}
+      moving:              {address: 46, size: 1}
+      punch:               {address: 48, size: 2}
+    # One READ covers 36..43: position, velocity, load, voltage, temperature.
+    # Everything this driver reports each cycle arrives in a single transaction.
+    present_block: [present_position, present_velocity, present_load,
+                    present_voltage, present_temperature]
+    # Protocol 1.0 sign conventions: bit 10 is a direction bit and the low 10
+    # bits are magnitude, for BOTH present_velocity and present_load. This is
+    # not two's complement -- decoding it as such gives ~2x wrong speeds near
+    # zero and a sign that flips in the wrong place.
+    signed_convention: direction_bit_10
+
+  protocol2_x:
+    # X-series (XL/XC/XM/XH/XW). One table shared across the line; per-model
+    # differences live in the `models:` rows, not here.
+    protocol: 2
+    source: https://emanual.robotis.com/docs/en/dxl/x/xl430-w250/
+    registers:
+      model_number:         {address: 0,   size: 2}
+      # EEPROM. Persistent (survives power-cycle), and per the e-Manual only
+      # writable while torque_enable=0. Added 2026-07-26 to fix a joint (the
+      # head joint of a Dynamixel arm, id 5) whose comfortable mechanical range
+      # straddled the encoder's own raw=0/4095 seam -- present_position was
+      # already reading negative (e.g. -68) at rest, and no choice of the
+      # driver's own zero_offset_counts can move that seam, because zero_offset_counts
+      # only relabels which rad a given raw is called; it does not change
+      # which raw the servo will accept for a goal write. Homing Offset is
+      # added to the raw absolute encoder value to PRODUCE present_position,
+      # so writing it re-centres the servo's own zero, moving the seam itself
+      # -- verified on hardware (not just read from the doc): a +100 test
+      # write moved present_position by exactly +100, confirming addition and
+      # the expected sign.
+      #
+      # HARD LIMIT, found by bisection on real hardware, not documented
+      # anywhere we could find at the time: in Position Control
+      # Mode (operating_mode=3, NOT Extended/multi-turn), a Homing Offset
+      # write beyond +-1024 (a quarter revolution; 4096/4) is ACCEPTED with a
+      # clean status packet (error byte 0x00) and reads back as whatever was
+      # written -- but silently has NO EFFECT on present_position. +1024
+      # shifts correctly; +1025 does nothing, present_position stays exactly
+      # where it was. There is no error to catch this: trusting the register
+      # read-back alone (rather than confirming the ACTUAL effect on
+      # present_position) would have silently left the calibration broken.
+      # Stay at or under 1024 in magnitude, and always confirm by reading
+      # present_position before and after, never by the write's error byte or
+      # the register read-back alone.
+      homing_offset:        {address: 20,  size: 4}
+      operating_mode:       {address: 11,  size: 1}
+      pwm_limit:            {address: 36,  size: 2}
+      max_position_limit:   {address: 48,  size: 4}
+      min_position_limit:   {address: 52,  size: 4}
+      torque_enable:        {address: 64,  size: 1}
+      hardware_error_status: {address: 70, size: 1}
+      goal_pwm:             {address: 100, size: 2}
+      goal_velocity:        {address: 104, size: 4}
+      profile_acceleration: {address: 108, size: 4}
+      profile_velocity:     {address: 112, size: 4}
+      goal_position:        {address: 116, size: 4}
+      present_pwm:          {address: 124, size: 2}
+      present_load:         {address: 126, size: 2}
+      present_velocity:     {address: 128, size: 4}
+      present_position:     {address: 132, size: 4}
+      present_input_voltage: {address: 144, size: 2}
+      present_temperature:  {address: 146, size: 1}
+    # 126..135, ten bytes: load, velocity, position.
+    #
+    # Voltage (144) and temperature (146) are deliberately NOT in the block.
+    # Reaching them would mean reading through 136..143, whose contents
+    # (Velocity/Position Trajectory) were not on the page this table was
+    # transcribed from -- and a block read that runs off the end of the control
+    # table is answered with a Data Length error, not with data. Add them here
+    # once those two addresses are confirmed against the e-Manual; until then
+    # `has_temperature_sense` is false because this driver genuinely does not
+    # deliver it, which is the honest reading of a capability flag.
+    present_block: [present_load, present_velocity, present_position]
+    # Protocol 2.0 multi-byte values are plain two's complement.
+    signed_convention: twos_complement
+    # X-series present_load is per-mille of rated torque, direction in the sign.
+    # It is NOT a current reading and is never reported as one.
+
+# ---------------------------------------------------------------------------
+# Models, keyed by the Model Number the servo reports at address 0.
+# ---------------------------------------------------------------------------
+models:
+
+  12:
+    name: AX-12A
+    table: protocol1_ax
+    source: https://emanual.robotis.com/docs/en/dxl/ax/ax-12a/
+    # 1024 counts spanning 300 deg => 1228.8 counts per notional full turn.
+    # Centre (150 deg) is count 512.
+    resolution: 1024
+    range_deg: 300.0
+    center_counts: 512
+    # Joint mode only. Wheel (continuous velocity) mode on an AX is entered by
+    # writing cw_angle_limit = ccw_angle_limit = 0, which silently changes what
+    # goal_position means -- a mode switch disguised as a limit change. It is
+    # not implemented, so VELOCITY is absent from `modes` and requesting it
+    # raises instead of moving the joint in an unexpected way.
+    modes:
+      position: null        # null => no operating_mode register to write
+    velocity_unit_rpm: 0.111     # "about 0.111rpm" per unit, joint mode
+    voltage_divisor: 10.0        # "10 times larger than the actual voltage"
+    load_unit_percent: 0.1       # "about 0.1%", direction in bit 10
+    current_unit_ma: null        # AX has no current sensing
+    torque_constant: null        # no published N*m/A => no CURRENT mode
+    has_temperature_sense: true
+    baudrates: [1000000, 500000, 400000, 250000, 200000, 115200, 57600,
+                19200, 9600]
+
+  1060:
+    name: XL430-W250-T
+    table: protocol2_x
+    source: https://emanual.robotis.com/docs/en/dxl/x/xl430-w250/
+    resolution: 4096
+    range_deg: 360.0
+    center_counts: 2048
+    modes:
+      position: 3
+      velocity: 1
+      pwm: 16
+    # Extended Position (multi-turn) is operating mode 4 on this servo. It is
+    # not an actuo OperatingMode -- it is POSITION with a wider range -- and
+    # wiring it up means deciding what the position limit means across turns,
+    # so it is recorded here and not yet exposed.
+    extended_position_mode: 4
+    velocity_unit_rpm: 0.229
+    voltage_divisor: null        # present_input_voltage scaling not transcribed
+    load_unit_percent: null      # present_load scaling not transcribed
+    current_unit_ma: null        # XL430 has NO current control or sensing
+    torque_constant: null
+    has_temperature_sense: false  # see `present_block` note on protocol2_x
+    # `baudrates` intentionally absent: the supported list was not on the page
+    # this row was transcribed from. actuo-dxl-probe falls back to its own sweep
+    # of common rates, which is a search, not a claim about this model.

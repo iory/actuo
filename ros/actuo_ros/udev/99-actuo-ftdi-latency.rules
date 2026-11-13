@@ -1,0 +1,7 @@
+# FTDI reply latency 16 ms -> 1 ms.
+#
+# The FTDI driver holds received bytes for up to `latency_timer` ms before
+# handing them to the host. On a request/response bus that caps the loop at
+# ~62 Hz, and a loop that runs faster reads NOTHING and republishes a frozen
+# pose. Applies to every ftdi_sio port, including the Kondo DUAL USB ADAPTER HS.
+ACTION=="add", SUBSYSTEM=="usb-serial", DRIVER=="ftdi_sio", ATTR{latency_timer}="1"

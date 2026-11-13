@@ -1,0 +1,12 @@
+<library path="actuo_hardware">
+  <class
+    name="actuo_hardware/ActuoSystem"
+    type="actuo_hardware::ActuoSystem"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Thin, motor-agnostic ros2_control SystemInterface. Exchanges flat joint
+      command/state vectors with actuo's Python bus servicer over a shared-memory
+      seqlock.
+    </description>
+  </class>
+</library>
