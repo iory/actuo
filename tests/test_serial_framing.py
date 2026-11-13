@@ -9,6 +9,8 @@ is far more expensive to debug than a bus that never works.
 A fake serial port stands in for the wire so this runs with no hardware.
 """
 
+import io
+
 import pytest
 
 from actuo.drivers import dynamixel_protocol as dxl
@@ -49,12 +51,15 @@ class FakePort:
     def close(self):
         self.is_open = False
 
+    def fileno(self):
+        raise io.UnsupportedOperation("no file descriptor")
+
 
 @pytest.fixture
 def fake_serial(monkeypatch):
     created = {}
 
-    def factory(channel, bitrate, timeout=0.0):
+    def factory(channel, bitrate, timeout=0.0, exclusive=None):
         port = FakePort()
         created["port"] = port
         return port

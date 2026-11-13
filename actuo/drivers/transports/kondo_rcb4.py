@@ -18,6 +18,7 @@ import serial
 from actuo.core.registry import register_transport
 
 from actuo.drivers.transports.kondo_h7 import KondoH7Transport
+from actuo.drivers.transports.exclusive_serial import open_exclusive
 
 #: The rate the bus switches the board to. The board itself powers up at the
 #: rate in its ROM config (115200 on a board without a HeartToHeart project);
@@ -49,7 +50,7 @@ class KondoRcb4Transport(KondoH7Transport):
     def open(self) -> None:
         if self._serial is not None:
             return
-        self._serial = serial.Serial(
+        self._serial = open_exclusive(
             self.channel, self.current_bitrate, parity=serial.PARITY_EVEN,
             timeout=self.timeout)
         self._serial.reset_input_buffer()

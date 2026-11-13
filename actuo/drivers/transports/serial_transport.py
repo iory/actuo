@@ -31,6 +31,7 @@ import serial
 
 from actuo.core.contracts import CapabilityError, Frame, Transport
 from actuo.core.registry import register_transport
+from actuo.drivers.transports.exclusive_serial import open_exclusive
 
 _HEADER = b"\xff\xff"          # Feetech / DYNAMIXEL 1.0
 _HEADER_2 = b"\xff\xff\xfd\x00"  # DYNAMIXEL 2.0 (the reserved 00 is part of it)
@@ -95,7 +96,7 @@ class SerialTransport(Transport):
     def open(self) -> None:
         if self._serial is not None:
             return
-        self._serial = serial.Serial(
+        self._serial = open_exclusive(
             self.channel, self.bitrate, timeout=self.timeout)
         self._serial.reset_input_buffer()
         self._serial.reset_output_buffer()
