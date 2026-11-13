@@ -17,8 +17,10 @@ dependencies = [
     # Robot models: URDF joints and limits, kinematics, and the skrobot-style
     # robot interface. 0.4.14 is the first release with
     # skrobot.interfaces.base.RobotInterfaceBase and skrobot.interpolation,
-    # which actuo.robot_interface builds on.
-    "scikit-robot>=0.4.14",
+    # which actuo.robot_interface builds on. 0.4.17 is the first that takes
+    # controller_state=None (no state subscription), which actuo_ros' ROS 2
+    # RobotInterface uses.
+    "scikit-robot>=0.4.17",
 ]
 
 [project.optional-dependencies]

@@ -264,7 +264,10 @@ class RobotInterface(ROS2RobotInterfaceBase):
         return [dict(
             controller_type=name,
             controller_action='{}{}/follow_joint_trajectory'.format(prefix, name),
-            controller_state='{}{}/controller_state'.format(prefix, name),
+            # No controller_state: nothing here reads it, and each
+            # controller publishes it at its update rate (100 Hz), which
+            # every other callback of this process then waits behind.
+            controller_state=None,
             action_type=control_msgs.action.FollowJointTrajectory,
             joint_names=list(joints))
             for name, joints in self._controller_joints.items()]
