@@ -80,6 +80,11 @@ STILL_TIMEOUT = 3.0
 # /clock at all) is reported instead of waiting forever.
 CLOCK_STALL = 30.0
 
+# [ns] the robot's clock may go back while something is waited for on it
+# before the wait gives up: more is a restarted simulator (its clock starts
+# again near 0), less may be a wall clock adjusted by NTP.
+CLOCK_BACK_NS = int(1e9)
+
 #: Name of the interface's node; also the logger whose level :func:`connect`
 #: lowers while the base class connects.
 NODE_NAME = 'actuo_robot_interface'
@@ -99,8 +104,10 @@ def _wait_future(future, timeout, what, clock=None):
         Count ``timeout`` on this clock (the node's: simulation time under
         ``use_sim_time``, so a simulator running slower than real time gets
         the same simulated seconds as a fast one). It must keep advancing:
-        standing still for :data:`CLOCK_STALL` wall seconds is an error.
-        ``None``: wall time.
+        standing still for :data:`CLOCK_STALL` wall seconds is an error,
+        and so is going back (a restarted simulator starts its clock again:
+        what was being waited for went with the old one, and would never be
+        answered). ``None``: wall time.
 
     Returns
     -------
@@ -118,6 +125,11 @@ def _wait_future(future, timeout, what, clock=None):
     moved_at = monotonic()
     while not done.wait(0.02):
         now = clock.now().nanoseconds
+        if now < last - CLOCK_BACK_NS:
+            raise RuntimeError(
+                '{}: the robot clock went back from {:.1f} s to {:.1f} s '
+                '(the simulator was restarted?): this was lost with it, '
+                'send it again'.format(what, last * 1e-9, now * 1e-9))
         if now != last:
             last = now
             moved_at = monotonic()

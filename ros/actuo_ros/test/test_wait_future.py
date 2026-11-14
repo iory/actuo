@@ -63,3 +63,30 @@ def test_stopped_clock_is_reported(monkeypatch):
 def test_wall_time_without_a_clock():
     with pytest.raises(RuntimeError, match='within 0.2 s'):
         robot._wait_future(Future(), 0.2, 'x')
+
+
+class RestartedClock(FakeClock):
+    """Runs from ``start``, then starts again at 0 after ``restart_after`` s."""
+
+    def __init__(self, restart_after, start=100.0):
+        super(RestartedClock, self).__init__(1.0, start)
+        self.restart_after = restart_after
+
+    def now(self):
+        wall = time.monotonic() - self.t0
+        if wall < self.restart_after:
+            return _Stamp(int((self.start + wall) * 1e9))
+        return _Stamp(int((wall - self.restart_after) * 1e9))
+
+
+def test_restarted_simulator_is_reported():
+    # Without a timeout (wait_interpolation's default) the old goal would be
+    # waited for forever on the new simulator's clock.
+    with pytest.raises(RuntimeError, match='clock went back'):
+        robot._wait_future(Future(), None, 'x', RestartedClock(0.2))
+
+
+def test_clock_starting_from_zero_is_not_a_restart():
+    # Sim time reads 0 until the first /clock, then jumps forward.
+    assert robot._wait_future(_done_after(0.3), 5.0, 'x',
+                              FakeClock(1.0, start=0.0)) == 'ok'
