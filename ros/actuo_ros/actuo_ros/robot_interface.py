@@ -32,6 +32,7 @@ import numpy as np
 import rclpy
 from controller_manager_msgs.srv import ListControllers
 from rclpy.action import ActionClient
+from rclpy.executors import ExternalShutdownException
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import DurabilityPolicy
 from rclpy.qos import QoSProfile
@@ -596,7 +597,17 @@ def connect(servo_ns='/actuo_bus_servicer', load_meshes=True, model_class=None,
     rclpy.logging.set_logger_level(NODE_NAME, rclpy.logging.LoggingSeverity.INFO)
     executor = SingleThreadedExecutor()
     executor.add_node(ri)
-    thread = threading.Thread(target=executor.spin, daemon=True)
+
+    def _spin():
+        # Two connect() calls in one process each register a _close; the
+        # later one shuts ROS down first, and this executor, still spinning,
+        # then raises ExternalShutdownException in its thread -- a traceback
+        # at every exit of a program that did nothing wrong.
+        try:
+            executor.spin()
+        except ExternalShutdownException:
+            pass
+    thread = threading.Thread(target=_spin, daemon=True)
     thread.start()
 
     def _close():
