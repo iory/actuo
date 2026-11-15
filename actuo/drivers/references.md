@@ -463,7 +463,8 @@ the framing, ack, version and batch move are shared, and the memory is not.
 | The board sometimes **refuses** a request with `[x, 0x15]` (x seen: 0x00, 0x01, 0x02, 0x0b), and answers the same request moments later | **measured** [19]; [18] retries reads for the same reason |
 | Firmware reply to `VERSION`: `fd "CB-4 V1.0      090715          " c7` | [17] `check_firmware_version`; **recorded** [19] |
 | COM port: **even parity** | [17] `RCB4Interface.open` |
-| Config word at `$0000`; COM rate in bits 6-7: `0` = 115200, `2` = 1.25 Mbit/s; the board acks a config write at the old rate, then switches | **measured** [19] (switched to 2, answered at 1.25 M only) |
+| Config word at `$0000`; COM rate in bits 6-7: `0` = 115200, `1` = 625000, `2` = 1.25 Mbit/s; the board acks a config write at the old rate, then switches | **measured** [19] (switched to 2, answered at 1.25 M only); [33] (switched to 1, answered at 625000) |
+| A board powers up at the COM rate its ROM holds, not always 115200: boards whose HeartToHeart project set 1.25 M power up at 1.25 M, so the bus tries every COM rate when connecting (`DEFAULT_CONNECT_BITRATES`) | **measured** [33] |
 | ICS rate in config bits 13-14: KRS servos set to 1.25 Mbit/s answer with `2`, not `0` or `1` (`3` also answered, meaning unknown, unused) | **measured** [19] |
 | ICS rate code `0` is 115200 bit/s on the ICS line | **measured** 2026-10-16 with an oscilloscope on the ICS line of the same rig as [19] (unpublished measurement, no URL); KRS servos set to 115200 (IDs 0, 2, 8) answered with it here, through rcb4 `assign_ics_servos` (config `0x8391`) |
 | ICS assignment table at `$0044`, one `uint16` per ICS number, `$FFFF` = unassigned, else the record address; loaded from the ROM project at power-up. A project may point a number at any 20 bytes of user RAM; the bus maps every such number back to its own record (`$0090` + 20 x number), servo off | [18] `servo_bus_rcb4.cpp` (cites the RCB-4 firmware reference); [21] firmware reference p.15 (records placed anywhere in user RAM `$0090..$048F`); **recorded** [19] |
@@ -508,7 +509,7 @@ the framing, ack, version and batch move are shared, and the memory is not.
 
 ### Not sourced — deliberately absent
 
-- **625000 bit/s** on COM, and every ICS rate but 115200 and 1.25 M: their
+- **COM rate code `3`**, and every ICS rate but 115200 and 1.25 M: their
   config values were not tried, so asking for one raises.
 - **Why large reads are refused or hang the board.** Not the address (a
   16-byte scan of `$0090..$0400` and `$01FC`+242 alone both answered), not
@@ -686,3 +687,12 @@ itself.
 [30] https://github.com/Pana1v/ultimate-robotics-handbook/blob/main/ros-2/micro-ros.md ("Practical RAM minimum")
 [31] https://docs.arduino.cc/tutorials/uno-r4-wifi/cheat-sheet
 [32] https://docs.arduino.cc/tutorials/uno-r4-wifi/wifi-examples
+[33] Measured 2026-11-15 on eleven RCB-4mini boards (Jedy, 22 KRS servos each),
+     each on its own Kondo Dual USB Adapter HS, through `actuo_bus_node` +
+     ros2_control with the transport at 625000. Three boards (ROM startup
+     config `0x4083`, `0x409b`, `0xc3ab`, COM bits = 1.25 M) answered only at
+     1.25 M after power-up; with `connect_bitrates` (115200,) their bus
+     reported "board answers at none of 625000, 115200 bit/s" and reset the
+     USB adapter dozens of times, and with (115200, 1250000) each connected
+     and switched to 625000. COM code `1` = 625000 also in rcb4's
+     `rcb4/protocol/references.md` [25] (<https://github.com/iory/rcb4>).

@@ -1105,3 +1105,19 @@ def test_needs_write_asks_for_the_lighter_hold_with_the_command_unchanged():
     bus.write_batch([command, None])
     assert set(bus.relaxed()) == {2}
     assert not bus.needs_write()
+
+
+def test_cold_start_from_a_board_that_powers_up_at_1250000():
+    # A HeartToHeart project can set the board's ROM COM rate to 1.25 M; the
+    # board then powers up there. The transport runs at 625000.
+    board = FakeRcb4({2: 9000, 5: 7000},
+                     config=protocol.with_com_bitrate(FACTORY_CONFIG, 1250000),
+                     bitrate=625000)
+    bus = make_bus(board)
+
+    items = bus.verify_servos()
+
+    # 625000 (the transport's) and 115200 drew nothing; 1.25 M answered.
+    assert board.reopened == [115200, 1250000, 625000]
+    assert board.board_bitrate == 625000
+    assert "bus/com_bitrate" in {item.name for item in items}
