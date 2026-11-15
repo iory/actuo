@@ -96,9 +96,13 @@ FRAME_SCALE_MS: Optional[float] = None
 #: State members read every cycle by default: the measured pulse only.
 DEFAULT_STATE_SLOTS = ("current_angle",)
 
-#: Rates tried when the board does not answer at the transport's rate. 115200
-#: is what a board without a HeartToHeart project powers up at.
-DEFAULT_CONNECT_BITRATES = (115200,)
+#: Rates tried when the board does not answer at the transport's rate: every
+#: COM rate the board has. A board powers up at the rate in its ROM -- 115200
+#: without a HeartToHeart project, 1.25 M on boards whose project set it --
+#: and rcb4 >= 0.2.4 leaves a board at 625000 until power-off. With 115200
+#: alone, a board that powered up at 1.25 M never came back after a power
+#: cycle (references.md [33]).
+DEFAULT_CONNECT_BITRATES = (115200, 625000, 1250000)
 
 #: Time for the board to exchange a frame with a newly assigned servo and
 #: write its position into the record.
