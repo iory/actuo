@@ -714,6 +714,15 @@ void ServoPanel::load(const rviz_common::Config & config)
     manager_ = managerOfTrajectoryAction(traj_ns.toStdString());
   }
   manager_edit_->setText(QString::fromStdString(manager_));
+  // rviz2 initializes a panel (onInitialize, which connects with the
+  // defaults) before it loads the panel's config. Connect again with the
+  // loaded names: otherwise the fields show them while the clients still
+  // use the defaults, and torque-on is refused for a controller_manager the
+  // panel never asked. If the config comes first, node_ is not set yet and
+  // onInitialize connects with the loaded names.
+  if (node_) {
+    onConnect();
+  }
 }
 
 }  // namespace actuo_rviz_plugins
