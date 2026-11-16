@@ -1746,6 +1746,12 @@ def run_real(args):
                 # someone is counting. Appears only once it has happened.
                 if recovery is not None and recovery.recoveries:
                     retry_note += "  reconnects={}".format(recovery.recoveries)
+                # Seqlock reads that hit a writer preempted mid-write and used
+                # the previous command (actuo.drivers.shm). Harmless one at a
+                # time; a count that climbs means the controller_manager is
+                # being starved of CPU.
+                if shm.torn_reads:
+                    retry_note += "  torn_shm_reads={}".format(shm.torn_reads)
                 print("[actuo_bus_node] {:6d} cycles  tx={:7d}  rx={:7d}  "
                       "err_frames={}  unmatched={}{}{}  torque={}".format(
                           cycles, frames_written, frames_read,
