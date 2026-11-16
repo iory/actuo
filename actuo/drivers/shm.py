@@ -63,6 +63,16 @@ Seqlock: the writer bumps its counter to odd, writes, bumps to even; a reader
 retries while the counter is odd or changed across the read. Aligned 8-byte
 loads/stores are atomic on x86-64/arm64. Memory ordering is best-effort (no
 fence primitive from Python).
+
+A writer holds its counter odd for nanoseconds, unless the OS preempts it
+between the two bumps. ros2_control runs without real-time priority on a stock
+kernel, so that does happen, for milliseconds. A reader therefore retries for
+a span of time (``READ_DEADLINE_S``), yielding the CPU while the counter is
+odd, rather than for a number of spins: 1000 spins of the Python loop take
+about 0.15 ms, shorter than one preemption. A read that still does not
+converge returns the block's last consistent copy and counts it in
+``torn_reads``, as long as that copy is younger than ``STALE_LIMIT_S``; past
+that it raises, because a writer stuck mid-write is a real fault.
 """
 
 from __future__ import annotations
@@ -95,7 +105,13 @@ _HEADER_SIZE = 64
 _CMD_SEQ_OFF = 16
 _STATE_SEQ_OFF = 24
 _EPOCH_OFF = 32
-_MAX_SPIN = 1000
+#: How long a seqlock read keeps retrying before it gives up on this read.
+READ_DEADLINE_S = 0.02
+#: How old the last consistent copy may be when a read gives up and returns it
+#: instead. Older than this, the read raises.
+STALE_LIMIT_S = 0.5
+#: Spins before a reader starts yielding the CPU to the (preempted) writer.
+_SPIN_BEFORE_YIELD = 100
 
 #: Floats per slot in each block. Fixed by the format rather than chosen per
 #: segment: both sides index slots by these, and a mismatch is refused.
@@ -245,6 +261,10 @@ class ShmBridge:
                     self.path, actual, size))
         self._fd = fd
         self._mm = mmap.mmap(fd, size)
+        #: Reads that did not converge within READ_DEADLINE_S and returned the
+        #: block's last consistent copy instead.
+        self.torn_reads = 0
+        self._last_good = {}
 
         if not create:
             magic, n, cs, ss = _HEADER.unpack(self._mm[0:_HEADER.size])
@@ -297,16 +317,30 @@ class ShmBridge:
         self._store_seq(off, s + 2)   # even: done
 
     def _read_block(self, off: int, view: np.ndarray) -> np.ndarray:
-        for _ in range(_MAX_SPIN):
+        deadline = time.monotonic() + READ_DEADLINE_S
+        spins = 0
+        while True:
             s1 = self._load_seq(off)
-            if s1 & 1:
-                continue
-            out = np.array(view, dtype=np.float64)  # copy under the lock
-            s2 = self._load_seq(off)
-            if s1 == s2:
-                return out
-        # torn read after spinning: surface it rather than return garbage
-        raise RuntimeError("shm {!r}: seqlock read did not converge".format(self.name))
+            if not s1 & 1:
+                out = np.array(view, dtype=np.float64)  # copy under the lock
+                s2 = self._load_seq(off)
+                if s1 == s2:
+                    self._last_good[off] = (out.copy(), time.monotonic())
+                    return out
+            spins += 1
+            if spins >= _SPIN_BEFORE_YIELD:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0)   # let a preempted writer finish
+        last = self._last_good.get(off)
+        if last is not None and time.monotonic() - last[1] <= STALE_LIMIT_S:
+            self.torn_reads += 1
+            return last[0].copy()
+        # Never read, or stuck for longer than a preemption: surface it rather
+        # than return garbage.
+        raise RuntimeError(
+            "shm {!r}: seqlock read did not converge (counter {} for {:.3f} s)"
+            .format(self.name, self._load_seq(off), READ_DEADLINE_S))
 
     # --- header ---
     def cmd_seq(self) -> int:
