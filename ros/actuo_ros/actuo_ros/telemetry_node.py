@@ -81,9 +81,12 @@ class SensorTelemetryPublisher:
         returns them.
     frame_ids : dict, optional
         Sensor name -> the URDF frame its IMU readings are expressed in. A
-        sensor with no entry gets no Imu publisher: an IMU published in an
-        unknown frame is unusable by anything that transforms it, and guessing
-        ``base_link`` would silently rotate every reading.
+        sensor with no entry is published in a frame named after the sensor
+        itself (``airrelay``): the board's own axes, which is what the numbers
+        are. That frame is in no TF tree, so anything that transforms the
+        reading fails with "frame does not exist" until the robot declares
+        where the board is -- unlike defaulting to ``base_link``, which would
+        silently rotate every reading for a board mounted any other way.
     """
 
     def __init__(self, node: Node,
@@ -99,16 +102,20 @@ class SensorTelemetryPublisher:
         for name, sensor in sensors:
             channels = {spec.name for spec in sensor.channels}
             if all(ch in channels for ch in _IMU_CHANNELS):
-                frame = self._frame_ids.get(name)
-                if frame:
-                    self._imu_pubs[name] = node.create_publisher(
-                        Imu, "~/{}/imu".format(name), _TELEMETRY_QOS)
+                self._frame_ids.setdefault(name, name)
+                self._imu_pubs[name] = node.create_publisher(
+                    Imu, "~/{}/imu".format(name), _TELEMETRY_QOS)
             # The pressure publisher is created lazily in publish(), not here.
             # A KJS-03 only knows it is the AIRRELAY variant -- the one with the
             # pump -- after its first sensor block, because the board revision
             # register sits outside the identity block. At construction time the
             # air channels do not exist yet, so deciding here would silently
             # drop the pressure topic on the very board that has one.
+
+    @property
+    def imu_sensors(self) -> List[str]:
+        """Names of the sensors an Imu is published for."""
+        return sorted(self._imu_pubs)
 
     @property
     def topics(self) -> List[str]:

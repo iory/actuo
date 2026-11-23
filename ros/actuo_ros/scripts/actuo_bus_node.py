@@ -1216,7 +1216,15 @@ def run_real(args):
                         ", ".join(telemetry.topics)), flush=True)
                 else:
                     print("[actuo_bus_node] no telemetry topics: no sensor "
-                          "declares both a known IMU range and a frame_id",
+                          "has IMU channels",
+                          file=sys.stderr, flush=True)
+                unplaced = [name for name in telemetry.imu_sensors
+                            if name not in sensor_frames]
+                if unplaced:
+                    print("[actuo_bus_node] IMU of {} published in the board's "
+                          "own frame (named after the sensor, not in TF): give "
+                          "the sensor a frame_id in the config to place it on "
+                          "the robot".format(", ".join(unplaced)),
                           file=sys.stderr, flush=True)
                 # Receives commands only; the actual bus write happens below,
                 # in the main loop, on the thread that owns the transport --
