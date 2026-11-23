@@ -559,7 +559,9 @@ def _build_kjs03(spec: Dict[str, Any], where: str):
     """Build a KJS-03 / AIRRELAY sensor board from its config block."""
     from actuo.drivers.sensors.kjs03 import Kjs03Sensor
     device_id = int(_require(spec, "id", where))
-    return Kjs03Sensor(device_id, board_rev=spec.get("board_rev"))
+    # protocol 1: the FEETECH firmware build, on a FEETECH servo bus.
+    return Kjs03Sensor(device_id, board_rev=spec.get("board_rev"),
+                       protocol=int(spec.get("protocol", 2)))
 
 
 #: Sensor plugins the config can name. A new sensor family adds one entry, the

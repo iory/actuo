@@ -24,6 +24,12 @@ the redesign.
 Provenance: ``KJS-03/docs/CONTROL_TABLE.md`` in the firmware repository, which
 is generated from the firmware's own ``include/control_table.h``. Addresses
 below are firmware v2.
+
+The same firmware is also built for a FEETECH bus (``pio run -e
+airrelay_feetech``) with the same control table; there it frames its packets
+the FEETECH / DYNAMIXEL 1.0 way (``FF FF ID LEN ..``, little-endian values),
+so ``protocol=1`` is all that changes (``KJS-03/docs/CONTROL_TABLE.md``,
+"Feetech モード").
 """
 
 from __future__ import annotations
@@ -65,6 +71,7 @@ REG_BOARD_REV = 99
 REG_IMU_SELECT = 100
 REG_IMU_ENABLED = 101
 REG_HW_ERROR_STATUS = 102
+REG_HW_VARIANT = 103
 REG_PRESSURE_CKPA = 104
 REG_SAMPLE_COUNTER = 106
 
@@ -114,6 +121,27 @@ AIR_OPS = {
     "pump_only": GPIO_PUMP_BIT,                 # 0x02 pump on, cup open
 }
 
+#: HW Variant (reg 103) of an air relay board whose valve stage is rev3. The
+#: firmware decides it at boot from the valve-enable pins (both high: rev2 = 2,
+#: otherwise rev3 = 3); boards and firmware without it read 0.
+HW_VARIANT_REV3 = 3
+
+#: Air ops of a rev3 air relay board: the firmware's own VALVE_STATE (reg 97), whose
+#: RELEASE vents the pad on this stage -- the firmware takes its pressure zero
+#: 1.2 s into RELEASE, with the pad vented (commit cc94e5f of the KJS-03 repository,
+#: ``docs/CONTROL_TABLE.md`` "圧力の 0 点（rev3）"). AUTO pumps until the
+#: pressure converges, then holds with the pump off and resumes when it leaks.
+#: The GPIO_STATE bits measured on rev2 (AIR_OPS) are not this stage's.
+AIR_VALVE_OPS_REV3 = {
+    "grip": VALVE_SUCTION,
+    "suction": VALVE_SUCTION,
+    "hold": VALVE_CLOSED,
+    "closed": VALVE_CLOSED,
+    "release": VALVE_RELEASE,
+    "off": VALVE_RELEASE,
+    "auto": 3,
+}
+
 #: Hardware error bits (control table 102).
 HW_ERR_BITS = {
     0x01: "imu",
@@ -121,6 +149,9 @@ HW_ERR_BITS = {
     0x04: "magnetic_encoder",
     0x08: "adc",
     0x10: "rx_overrun",
+    # rev3: the board did not adopt a pressure zero, so 0 kPa may be a broken
+    # sensor rather than atmosphere (docs/CONTROL_TABLE.md, reg 102).
+    0x20: "pressure_zero",
 }
 
 #: Error bits that mean something is actually WRONG on an AIRRELAY board.
@@ -131,7 +162,7 @@ HW_ERR_BITS = {
 #: as a fault trains an operator to ignore the fault line, which is worse than
 #: not having one -- so the bits are still published as channels (nothing is
 #: hidden), and only these are escalated.
-AIRRELAY_REAL_ERROR_BITS = 0x01 | 0x08 | 0x10  # imu, adc, rx_overrun
+AIRRELAY_REAL_ERROR_BITS = 0x01 | 0x08 | 0x10 | 0x20  # imu, adc, rx_overrun, pressure_zero
 
 _G = 9.80665
 
@@ -163,14 +194,24 @@ class Kjs03Sensor(Sensor):
         counts only -- never scaled with a guessed range.
     board_rev : int, optional
         Filled in from the board. Decides whether the valve channels exist.
+    protocol : int
+        Packet framing of the firmware build: 2 for the DYNAMIXEL 2.0 build,
+        1 for the FEETECH build (FEETECH / DYNAMIXEL 1.0 framing).
     """
 
     def __init__(self, device_id: int,
                  ranges: Optional[Kjs03Ranges] = None,
-                 board_rev: Optional[int] = None) -> None:
+                 board_rev: Optional[int] = None,
+                 protocol: int = dxl.PROTOCOL_2) -> None:
         super().__init__(device_id, calibration=None)
         self.ranges = ranges
         self.board_rev = board_rev
+        if protocol not in dxl.PROTOCOLS:
+            raise ValueError("protocol must be 1 (FEETECH build) or 2 "
+                             "(DYNAMIXEL 2.0 build), got {!r}".format(protocol))
+        self.protocol = int(protocol)
+        #: HW Variant (reg 103), learned from the first sensor read.
+        self.hw_variant: Optional[int] = None
 
     # --- identity ------------------------------------------------------------
     @property
@@ -194,7 +235,7 @@ class Kjs03Sensor(Sensor):
 
     def encode_identity_query(self) -> List[Frame]:
         """READ the EEPROM block that identifies the board and its IMU ranges."""
-        payload = dxl.build_read(dxl.PROTOCOL_2, self.id, REG_MODEL_NUMBER, 16)
+        payload = dxl.build_read(self.protocol, self.id, REG_MODEL_NUMBER, 16)
         return [Frame(payload=payload, address=self.id)]
 
     def decode_identity(self, frame: Frame) -> Dict[str, object]:
@@ -204,7 +245,7 @@ class Kjs03Sensor(Sensor):
         every address below is read against a different device's control table,
         and every value that comes back is plausible.
         """
-        parsed = dxl.parse_status(dxl.PROTOCOL_2, frame.payload)
+        parsed = dxl.parse_status(self.protocol, frame.payload)
         if parsed is None or parsed[0] != self.id:
             raise ValueError("id {}: not this device's status".format(self.id))
         data = parsed[2]
@@ -262,16 +303,16 @@ class Kjs03Sensor(Sensor):
     # --- reads ---------------------------------------------------------------
     def encode_query(self) -> List[Frame]:
         """One READ for every channel this board reports."""
-        payload = dxl.build_read(dxl.PROTOCOL_2, self.id,
+        payload = dxl.build_read(self.protocol, self.id,
                                  SENSOR_BLOCK_ADDR, SENSOR_BLOCK_LEN)
         return [Frame(payload=payload, address=self.id)]
 
     def matches(self, frame: Frame) -> bool:
-        parsed = dxl.parse_status(dxl.PROTOCOL_2, frame.payload)
+        parsed = dxl.parse_status(self.protocol, frame.payload)
         return parsed is not None and parsed[0] == self.id
 
     def decode_state(self, frame: Frame) -> Telemetry:
-        parsed = dxl.parse_status(dxl.PROTOCOL_2, frame.payload)
+        parsed = dxl.parse_status(self.protocol, frame.payload)
         if parsed is None or parsed[0] != self.id:
             raise ValueError("id {}: not this device's status".format(self.id))
         return self.decode_block(parsed[2])
@@ -327,6 +368,8 @@ class Kjs03Sensor(Sensor):
         out["board_revision"] = float(data[at(REG_BOARD_REV)])
         out["imu/select"] = float(data[at(REG_IMU_SELECT)])
         out["imu/enabled"] = float(data[at(REG_IMU_ENABLED)])
+        self.hw_variant = data[at(REG_HW_VARIANT)]
+        out["hw_variant"] = float(self.hw_variant)
         out["sample_counter"] = float(u16(REG_SAMPLE_COUNTER))
 
         error = data[at(REG_HW_ERROR_STATUS)]
@@ -342,22 +385,46 @@ class Kjs03Sensor(Sensor):
         return out
 
     # --- air / gripper command -----------------------------------------------
+    @property
+    def air_ops(self) -> Tuple[str, ...]:
+        """The op names :meth:`encode_air` takes on this board's valve stage."""
+        if self.hw_variant == HW_VARIANT_REV3:
+            return tuple(sorted(AIR_VALVE_OPS_REV3))
+        return tuple(sorted(AIR_OPS))
+
     def encode_air(self, op) -> Frame:
         """Frame that drives the vacuum gripper -- the verified control path.
 
-        ``op`` is one of ``grip``/``suction`` / ``hold`` / ``release``/``off``
-        / ``pump_only`` (see :data:`AIR_OPS`), or a raw ``GPIO_STATE`` byte.
+        Which register that is depends on the valve stage, read off the board
+        (reg 103), so the board must have been read once
+        (:meth:`decode_block`) before a command:
 
-        This writes ``GPIO_STATE`` (reg 96) directly, which is what was checked
-        on hardware: ``grip`` reaches -45 kPa, ``release`` returns to 0 kPa.
-        Prefer it over :meth:`encode_valve` -- the firmware ``VALVE_STATE``
-        ``release`` keeps the relay energised and holds the vacuum on this
-        plumbing instead of venting, so it cannot actually let a workpiece go.
+        * rev3 (``hw_variant`` 3): ``VALVE_STATE`` (reg 97), with ``grip`` /
+          ``suction``, ``hold`` / ``closed``, ``release`` / ``off`` and
+          ``auto`` (see :data:`AIR_VALVE_OPS_REV3`).
+        * otherwise: ``GPIO_STATE`` (reg 96) directly, with ``grip`` /
+          ``suction``, ``hold``, ``release`` / ``off`` and ``pump_only``
+          (:data:`AIR_OPS`), or a raw byte. That is what was checked on a rev2
+          board: ``grip`` reaches -45 kPa, ``release`` returns to 0 kPa, while
+          its firmware ``VALVE_STATE`` ``release`` kept the relay energised and
+          held the vacuum.
         """
         if not self.has_valves:
             raise CapabilityError(
                 "id {}: this board is a KJS-03 (rev {}), not an AIRRELAY; it "
                 "has no gripper".format(self.id, self.board_rev))
+        if self.hw_variant is None:
+            raise CapabilityError(
+                "id {}: the board has not been read yet, so its valve stage "
+                "(rev2 or rev3, reg 103) and the register that drives it are "
+                "unknown".format(self.id))
+        if self.hw_variant == HW_VARIANT_REV3:
+            if op not in AIR_VALVE_OPS_REV3:
+                raise ValueError("unknown air op {!r} for a rev3 air relay board; "
+                                 "known: {}".format(op, self.air_ops))
+            payload = dxl.build_write(self.protocol, self.id, REG_VALVE_STATE,
+                                      bytes([AIR_VALVE_OPS_REV3[op]]))
+            return Frame(payload=payload, address=self.id)
         if isinstance(op, str):
             if op not in AIR_OPS:
                 raise ValueError("unknown air op {!r}; known: {}".format(
@@ -365,7 +432,7 @@ class Kjs03Sensor(Sensor):
             value = AIR_OPS[op]
         else:
             value = int(op) & 0xFF
-        payload = dxl.build_write(dxl.PROTOCOL_2, self.id, REG_GPIO_STATE,
+        payload = dxl.build_write(self.protocol, self.id, REG_GPIO_STATE,
                                   bytes([value]))
         return Frame(payload=payload, address=self.id)
 
@@ -398,6 +465,6 @@ class Kjs03Sensor(Sensor):
                 raise ValueError(
                     "valve state {} is not one of {}".format(
                         value, sorted(VALVE_STATES.values())))
-        payload = dxl.build_write(dxl.PROTOCOL_2, self.id, REG_VALVE_STATE,
+        payload = dxl.build_write(self.protocol, self.id, REG_VALVE_STATE,
                                   bytes([value]))
         return Frame(payload=payload, address=self.id)

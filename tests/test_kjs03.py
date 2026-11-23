@@ -35,7 +35,7 @@ def identity_block(model=KJS03_MODEL_NUMBER, magic=KJS03_MODEL_INFO_MAGIC):
 
 def sensor_block(gyro=(0, 0, 0), acc=(0, 0, 0), pressure_ckpa=0,
                  board_rev=BOARD_REV_AIRRELAY, error=0, counter=0,
-                 valve=0, mag=0):
+                 valve=0, mag=0, hw_variant=0):
     block = b""
     for value in gyro:
         block += dxl.to_le(value, 2)
@@ -44,7 +44,7 @@ def sensor_block(gyro=(0, 0, 0), acc=(0, 0, 0), pressure_ckpa=0,
     block += b"".join(dxl.to_le(1000 + i, 2) for i in range(5))   # adc
     block += b"".join(dxl.to_le(2000 + i, 2) for i in range(4))   # proximity
     block += dxl.to_le(mag, 2)                                    # mag angle
-    block += bytes([0, valve, 1, board_rev, 0, 1, error, 0])      # 96..103
+    block += bytes([0, valve, 1, board_rev, 0, 1, error, hw_variant])  # 96..103
     block += dxl.to_le(pressure_ckpa, 2)                          # 104
     block += dxl.to_le(counter, 2)                                # 106
     assert len(block) == SENSOR_BLOCK_LEN
@@ -154,8 +154,15 @@ def _air_write(board, op):
     return dxl.from_le(body[1:3]), body[3]
 
 
+def _read_board(hw_variant=0, protocol=dxl.PROTOCOL_2):
+    """An air relay board that has been read once, as the servicer does first."""
+    board = Kjs03Sensor(DEVICE_ID, protocol=protocol)
+    board.decode_block(sensor_block(hw_variant=hw_variant))
+    return board
+
+
 def test_air_command_writes_gpio_state_not_valve_state():
-    board = Kjs03Sensor(DEVICE_ID, board_rev=BOARD_REV_AIRRELAY)
+    board = _read_board()
     reg, value = _air_write(board, "grip")
     assert reg == 96                      # CTRL_GPIO_STATE, NOT 97 VALVE_STATE
     assert value == 0x03                  # pump (0x02) + relay (0x01)
@@ -164,7 +171,7 @@ def test_air_command_writes_gpio_state_not_valve_state():
 def test_air_release_drops_the_relay_so_it_actually_vents():
     # The whole reason air control uses GPIO_STATE: release must clear the relay
     # bit. The firmware VALVE_STATE "release" leaves it set and holds vacuum.
-    board = Kjs03Sensor(DEVICE_ID, board_rev=BOARD_REV_AIRRELAY)
+    board = _read_board()
     _reg, value = _air_write(board, "release")
     assert value == 0x00                  # both off -> vent
     assert AIR_OPS["hold"] == 0x01        # relay only -> vacuum held, pump off
@@ -178,9 +185,40 @@ def test_air_command_is_refused_on_a_board_without_a_gripper():
 
 
 def test_an_unknown_air_op_is_refused():
-    board = Kjs03Sensor(DEVICE_ID, board_rev=BOARD_REV_AIRRELAY)
+    board = _read_board()
     with pytest.raises(ValueError):
         board.encode_air("suck_hard")
+
+
+def test_air_command_is_refused_before_the_board_was_read():
+    # Which register drives the valves depends on the stage the board reports.
+    board = Kjs03Sensor(DEVICE_ID, board_rev=BOARD_REV_AIRRELAY)
+    with pytest.raises(CapabilityError, match="not been read"):
+        board.encode_air("grip")
+
+
+def test_a_rev3_board_is_driven_through_valve_state():
+    board = _read_board(hw_variant=3)
+    assert board.hw_variant == 3
+    assert "auto" in board.air_ops and "pump_only" not in board.air_ops
+    for op, value in (("grip", 1), ("release", 2), ("hold", 0), ("auto", 3)):
+        body = dxl.remove_stuffing(board.encode_air(op).payload[7:-2])
+        assert dxl.from_le(body[1:3]) == 97 and body[3] == value
+    with pytest.raises(ValueError):
+        board.encode_air("pump_only")
+
+
+def test_the_feetech_build_is_framed_like_dynamixel_1():
+    board = _read_board(hw_variant=3, protocol=dxl.PROTOCOL_1)
+    query = board.encode_query()[0].payload
+    assert query == dxl.build_read(dxl.PROTOCOL_1, DEVICE_ID, 64, SENSOR_BLOCK_LEN)
+    reply = Frame(payload=dxl.build_packet(dxl.PROTOCOL_1, DEVICE_ID, 0,
+                                           sensor_block(pressure_ckpa=-3959,
+                                                        hw_variant=3)))
+    assert board.matches(reply)
+    assert board.decode_state(reply)["air/pressure"] == pytest.approx(-39.59)
+    write = board.encode_air("release").payload
+    assert write == dxl.build_write(dxl.PROTOCOL_1, DEVICE_ID, 97, bytes([2]))
 
 
 # --- framing -----------------------------------------------------------------
