@@ -1115,7 +1115,7 @@ class ServoSupervisor:
         if mode is OperatingMode.VELOCITY:
             return ActuatorCommand(mode=mode, velocity=value)
         if mode is OperatingMode.CURRENT:
-            return ActuatorCommand(mode=mode, effort=value)
+            return ActuatorCommand(mode=mode, current=value)
         return ActuatorCommand(mode=mode, position=value)
 
     # --- transitions -------------------------------------------------------
