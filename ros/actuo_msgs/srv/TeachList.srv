@@ -1,0 +1,4 @@
+# Saved recordings, sorted by name, with their length [s].
+---
+string[] names
+float64[] durations

@@ -30,6 +30,7 @@ ament_uv_install_python_scripts(
     scripts/actuo_bus_node.py
     scripts/actuo_presence_markers.py
     scripts/actuo_watch_pose.py
+    scripts/actuo_teach_node.py
   STRIP_PY_EXTENSION
 )
 
