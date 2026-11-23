@@ -610,6 +610,46 @@ class RobotInterface(ROS2RobotInterfaceBase):
         for name in controllers:
             self.wait_interpolation(name, timeout)
 
+    def set_origin(self, joint, reference, timeout=10.0):
+        """Declare the pose ``joint`` is in right now to be ``reference`` rad.
+
+        Calibration: the servicer re-labels the joint's position in the
+        actuator itself (see ``actuo_msgs/action/SetOrigin``). Afterwards, if
+        the joint holds torque, its controller is re-synced to the new
+        reading.
+
+        Raises
+        ------
+        ServoRefused
+            With the servicer's reason.
+        """
+        from actuo_msgs.action import SetOrigin
+        if self._servo_ns is None:
+            raise RuntimeError('servo_ns is None: this interface has no servicer')
+        if getattr(self, '_origin_client', None) is None:
+            self._origin_client = ActionClient(
+                self, SetOrigin, self._servo_ns.rstrip('/') + '/set_origin')
+        if not self._origin_client.wait_for_server(timeout_sec=timeout):
+            raise RuntimeError('no {}/set_origin: does this bus support it?'.format(
+                self._servo_ns))
+        goal = SetOrigin.Goal(joint=joint, reference=float(reference))
+        handle = _wait_future(self._origin_client.send_goal_async(goal), timeout,
+                              'set_origin', self.get_clock())
+        if not handle.accepted:
+            raise RuntimeError('set_origin refused the request')
+        result = _wait_future(handle.get_result_async(), timeout, 'set_origin',
+                              self.get_clock()).result
+        if not result.ok:
+            raise ServoRefused(result.reason)
+        self.get_logger().warn(result.reason)
+        enabled = {j.name: j.enabled for j in result.joints}
+        if enabled.get(joint):
+            controller = self.controller_of(joint)
+            self.update_robot_state(wait_until_update=True)
+            self._send_measured([controller], {joint: float(reference)}, 0.1)
+            self.wait_interpolation(controller, timeout)
+        return result.reason
+
     def guarded_move(self, joint, displacement, velocity=0.1,
                      max_tracking_error=0.08, max_load=0.0, backoff=0.0,
                      timeout=None):

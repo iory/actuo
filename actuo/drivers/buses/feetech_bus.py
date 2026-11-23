@@ -273,6 +273,100 @@ class FeetechBus(Bus):
             remaining.discard(parsed[0])
         return fresh
 
+    # --- calibration ---------------------------------------------------------
+    def set_origin(self, index: int, position: float, torque: bool) -> Dict[str, float]:
+        """Make the pose servo ``index`` is in right now read as ``position``.
+
+        Writes the servo's EEPROM ``homing_offset`` (unlocking and locking the
+        EEPROM around it, as feetech-cli does), so the calibration lives in
+        the servo and survives a power cycle; the config's ``offset_deg``
+        stays what it was. The relationship, measured on an STS3215, is
+        ``present = (raw - homing_offset) mod 4096`` in position mode.
+
+        The servo does not move: torque goes off for the write, the goal is
+        re-pointed at the new reading before it may come back on, and only
+        then is torque restored to ``torque``. A servo left in PWM mode is
+        put back in position mode first, since outside it the reading carries
+        no offset to work from.
+
+        A write is confirmed by its effect: the position is read back and must
+        be within 2 counts of ``position``, else this raises rather than
+        report a calibration that did not happen.
+
+        Parameters
+        ----------
+        index : int
+            The servo, in bus order.
+        position : float
+            The angle the present pose is declared to be [rad].
+        torque : bool
+            Torque on afterwards (holding the pose), or off.
+
+        Returns
+        -------
+        dict
+            ``old_offset``, ``new_offset`` and ``reported`` (counts).
+
+        Raises
+        ------
+        ValueError
+            The angle is outside one turn, or the offset it needs is outside
+            what the register holds.
+        RuntimeError
+            A servo did not answer, or the read-back does not match.
+        """
+        from feetech_cli.registers import (EEPROM_LOCKED, EEPROM_UNLOCKED,
+                                           MAX_HOMING_OFFSET, RESOLUTION)
+
+        actuator = self.actuators[index]
+        target = int(round(actuator.calibration.rad_to_counts(position)))
+        if not 0 <= target < RESOLUTION:
+            raise ValueError("id {}: {:+.4f} rad is count {}, outside one turn"
+                             .format(actuator.id, position, target))
+        if actuator.facts.wire_mode != WIRE_MODE_POSITION:
+            self._set_wire_mode(actuator, OperatingMode.POSITION)
+
+        def read(register: str) -> int:
+            reply = self._ack([actuator.encode_read(register)],
+                              "the {} read".format(register))[0]
+            return actuator.decode_register(register, reply)
+
+        old = read("homing_offset")
+        present = read("present_position")
+        raw = (present + old) % RESOLUTION
+        new = raw - target
+        if abs(new) > MAX_HOMING_OFFSET:
+            raise ValueError(
+                "id {}: declaring this pose {:+.4f} rad needs a homing offset of "
+                "{}, and the register holds +/-{}; the joint is too far from "
+                "that angle".format(actuator.id, position, new, MAX_HOMING_OFFSET))
+        self._ack([actuator.encode_write("torque_enable", 0)], "the torque off")
+        self._ack([actuator.encode_write("lock", EEPROM_UNLOCKED)], "the EEPROM unlock")
+        try:
+            self._ack([actuator.encode_write("homing_offset", new)],
+                      "the homing_offset write")
+        finally:
+            self._ack([actuator.encode_write("lock", EEPROM_LOCKED)],
+                      "the EEPROM lock")
+        time.sleep(0.05)
+        reported = read("present_position")
+        actuator.facts.homing_offset = read("homing_offset")
+        if actuator.facts.homing_offset != new or abs(reported - target) > 2:
+            raise RuntimeError(
+                "id {}: wrote homing_offset {} (was {}) to read {}, but the servo "
+                "now has offset {} and reads {}".format(
+                    actuator.id, new, old, target, actuator.facts.homing_offset,
+                    reported))
+        # The goal in the new frame before torque may return: the goal write
+        # alone energises an STS (feetech-cli set_zero), hence the restore.
+        self._ack([Frame(payload=fp.build_write(
+            actuator.id, *actuator.position_goal(reported)), address=actuator.id)],
+            "the goal re-point")
+        self._ack([actuator.encode_write("torque_enable", 1 if torque else 0)],
+                  "the torque restore")
+        return {"old_offset": float(old), "new_offset": float(new),
+                "reported": float(reported)}
+
     # --- diagnostics ---------------------------------------------------------
     def diagnose(self) -> List[DiagItem]:
         items = [DiagItem(
