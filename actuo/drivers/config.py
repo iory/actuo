@@ -616,10 +616,11 @@ def sensor_frames(sensors: "List[Dict[str, Any]] | None") -> Dict[str, str]:
     URDF puts there (for example ``imu_link``, whose transform should be
     measured on the robot, not read off a drawing).
 
-    A sensor with no ``frame_id`` is not defaulted. An IMU published in a
-    guessed frame is silently rotated for everything downstream that transforms
-    it, which is exactly the class of plausible-but-wrong output this package
-    refuses to produce.
+    A sensor with no ``frame_id`` is left out here, and is not defaulted to a
+    robot link: an IMU published in a guessed link is silently rotated for
+    everything downstream that transforms it. The servicer publishes it in a
+    frame named after the sensor instead -- the board's own axes, which TF does
+    not know, so a transform of it fails loudly until the robot places it.
     """
     out: Dict[str, str] = {}
     for index, entry in enumerate(sensors or []):

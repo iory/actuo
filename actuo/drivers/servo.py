@@ -512,11 +512,22 @@ class ServoSupervisor:
         limited = last + math.copysign(step, value - last)
         if now - self._rate_said.get(index, -math.inf) >= RECOVER_REPEAT_S:
             self._rate_said[index] = now
+            # Both ends and the measured angle: which of them is the odd one
+            # out is what tells a controller that leapt (a trajectory sampled
+            # past its end) from one that snapped to a bad reading (a hold
+            # taken from a wrong state). 2026-11-23 a "-0.5261 rad" jump of
+            # joint0 right after a forced servo_on could not be told apart
+            # afterwards from the two numbers this used to print.
+            state = self.bus.last_state(self.bus.actuators[index].id)
+            measured = (state.position if state is not None
+                        and state.position is not None else math.nan)
             self._filter_event = (
-                "{}: the command jumped {:+.4f} rad in one cycle ({:.1f} rad/s); "
-                "moving it at the {:.2f} rad/s max_velocity instead".format(
+                "{}: the command jumped {:+.4f} rad in one cycle ({:.1f} rad/s; "
+                "{:+.4f} -> {:+.4f}, measured {:+.4f}); moving it at the "
+                "{:.2f} rad/s max_velocity instead".format(
                     self.joint_names[index], value - last,
-                    abs(value - last) / max(dt, 1e-6), limit))
+                    abs(value - last) / max(dt, 1e-6), last, value, measured,
+                    limit))
         return limited
 
     def _unowned(self, index: int, value: float) -> float:
