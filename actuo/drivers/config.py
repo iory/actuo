@@ -253,6 +253,37 @@ def _build_feetech_scs(spec: Dict[str, Any], where: str) -> Actuator:
                                             calibration)
 
 
+def _build_feetech_sts(spec: Dict[str, Any], where: str) -> Actuator:
+    """Translate the config block for one FEETECH STS/SMS/HLS servo.
+
+    ``model`` is required (``STS3215``, ``HLS3960M``, ...): an HLS takes its
+    position goal in another register layout than an STS, and the bus checks
+    the servo's model_number against it before writing anything.
+    ``offset_deg`` is the joint's zero relative to the servo's centre count
+    (2048), the same convention as the ``dynamixel`` plugin.
+    """
+    # First, so a missing feetech-cli is reported by the registry, naming the
+    # extra that installs it.
+    actuator_cls = get_actuator("feetech_sts")
+    from actuo.drivers.actuators.feetech_sts import (
+        FeetechStsCalibration, model_by_name)
+    from feetech_cli.registers import CENTER_POSITION, RESOLUTION
+
+    model = model_by_name(str(_require(spec, "model", where)))
+    position_limit = spec.get("position_limit_deg")
+    calibration = FeetechStsCalibration(
+        zero_offset_counts=(float(CENTER_POSITION)
+                            + float(spec.get("offset_deg", 0.0))
+                            * RESOLUTION / 360.0),
+        direction=int(spec.get("direction", 1)),
+        torque_constant=spec.get("torque_constant"),
+        position_limit=(
+            (math.radians(position_limit[0]), math.radians(position_limit[1]))
+            if position_limit else None),
+    )
+    return actuator_cls(int(_require(spec, "id", where)), calibration, model)
+
+
 def _build_dynamixel(spec: Dict[str, Any], where: str) -> Actuator:
     """Translate the config block for one DYNAMIXEL servo into an Actuator.
 
@@ -482,6 +513,7 @@ _ACTUATOR_BUILDERS = {
     "cubemars_v3": _build_cubemars_v3,
     "dynamixel": _build_dynamixel,
     "feetech_scs0009": _build_feetech_scs,
+    "feetech_sts": _build_feetech_sts,
     "kondo_ics": _build_kondo_ics,
     "kondo_ics_wheel": _build_kondo_ics_wheel,
 }
@@ -770,6 +802,11 @@ def build_bus(
         if bus_plugin == "serial_bus" and all(
                 isinstance(a, DynamixelActuator) for a in actuators):
             bus_plugin = "dynamixel_bus"
+        if bus_plugin == "serial_bus" and all(
+                type(a).__name__ == "FeetechStsActuator" for a in actuators):
+            # By name: importing the class needs feetech-cli, which a robot
+            # without these servos does not have.
+            bus_plugin = "feetech_bus"
 
     if bus_plugin == "dynamixel_bus" and transport_spec.get("plugin") == "serial":
         protocols = {a.protocol for a in actuators}
@@ -837,6 +874,13 @@ def build_bus(
         bus = SerialBus(
             transport, actuators,
             read_timeout=float(bus_spec.get("read_timeout", 0.05)))
+    elif bus_plugin == "feetech_bus":
+        from actuo.drivers.buses.feetech_bus import FeetechBus
+        bus = FeetechBus(
+            transport, actuators,
+            read_timeout=float(bus_spec.get("read_timeout", 0.05)),
+            use_sync_read=bool(bus_spec.get("use_sync_read", True)),
+            reset_torque_limit=bool(bus_spec.get("reset_torque_limit", True)))
     elif bus_plugin == "dynamixel_bus":
         from actuo.drivers.buses.dynamixel_bus import DynamixelBus
         bus = DynamixelBus(
@@ -852,7 +896,7 @@ def build_bus(
             stale_after=float(bus_spec.get("stale_after", 1.0)))
     else:
         raise KeyError(
-            "unknown bus plugin {!r}; known: can_bus, dynamixel_bus, "
+            "unknown bus plugin {!r}; known: can_bus, dynamixel_bus, feetech_bus, "
             "kondo_h7_bus, kondo_rcb4_bus, serial_bus"
             .format(bus_plugin))
     return bus, names

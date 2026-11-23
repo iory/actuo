@@ -1,7 +1,7 @@
 """Bus orchestration implementations (batch write + scheduled reads).
 
 The classes are imported on first access, so ``from actuo.drivers.buses import
-DynamixelBus`` does not import rcb4 or python-can.
+DynamixelBus`` does not import rcb4, feetech-cli or python-can.
 """
 
 import importlib
@@ -10,6 +10,7 @@ _MODULES = {
     "CanBus": "can_bus",
     "StaleFeedbackError": "can_bus",
     "DynamixelBus": "dynamixel_bus",
+    "FeetechBus": "feetech_bus",
     "KondoH7Bus": "kondo_h7_bus",
     "KondoRcb4Bus": "kondo_rcb4_bus",
 }

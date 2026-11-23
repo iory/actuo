@@ -39,6 +39,7 @@ _BUILTIN_ACTUATORS: Dict[str, Tuple[str, "str | None"]] = {
     "cubemars_v3": ("actuo.drivers.actuators.cubemars_v3", None),
     "dynamixel": ("actuo.drivers.actuators.dynamixel", None),
     "feetech_scs0009": ("actuo.drivers.actuators.feetech_scs", None),
+    "feetech_sts": ("actuo.drivers.actuators.feetech_sts", "feetech"),
     "kondo_ics": ("actuo.drivers.actuators.kondo_ics", "kondo"),
     "kondo_ics_wheel": ("actuo.drivers.actuators.kondo_ics_wheel", "kondo"),
 }
