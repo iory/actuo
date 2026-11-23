@@ -1311,9 +1311,15 @@ def run_real(args):
         # logged every cycle at 50 Hz is a fault nobody reads, and a fault that
         # clears silently is one nobody knows cleared.
         last_fault = {}
-        # {joint: was it above the temperature warning last cycle}. Same
+        # {joint: is it reported above the temperature warning}. Same
         # change-detection shape as last_fault: report on crossing, both ways.
         last_hot = {}
+        # {joint: consecutive cycles the reading disagreed with last_hot}. A
+        # crossing counts only after --temp-warn-cycles of them in a row: a
+        # loaded STS3215 returns single-cycle temperature spikes (33 -> 150 C
+        # -> 33 C, checksum-valid, in both the block and a 1-byte read of
+        # register 63), and a motor cannot heat or cool that fast.
+        hot_streak = {}
         # Same change-detection shape, for the transport's retry counter: warn
         # when it MOVES, not once per cycle it happens to be non-zero.
         last_tx_retries = 0
@@ -1858,8 +1864,14 @@ def run_real(args):
                 # back down too, so "it cooled" is as visible as "it is hot".
                 if st.temperature is not None and args.temp_warn > 0:
                     hot = st.temperature >= args.temp_warn
-                    if hot != last_hot.get(joint_names[i], False):
-                        last_hot[joint_names[i]] = hot
+                    name = joint_names[i]
+                    if hot == last_hot.get(name, False):
+                        hot_streak[name] = 0
+                    else:
+                        hot_streak[name] = hot_streak.get(name, 0) + 1
+                    if hot_streak.get(name, 0) >= args.temp_warn_cycles:
+                        hot_streak[name] = 0
+                        last_hot[name] = hot
                         if hot:
                             print("[actuo_bus_node] HOT {} (id {}): {:.0f}C, over "
                                   "the {:.0f}C warning. Not a fault yet -- the "
@@ -2040,6 +2052,11 @@ def main(argv=None):
                         "This is an EARLY warning, well under any motor's own "
                         "thermal limit: the motor's fault is protection after "
                         "the fact, by which point the run is already lost.")
+    p.add_argument("--temp-warn-cycles", type=int, default=5,
+                   help="consecutive cycles a temperature must stay on the "
+                        "other side of --temp-warn before the crossing is "
+                        "reported. A loaded STS3215 returns single-cycle "
+                        "spikes (33 -> 150 C -> 33 C); 1 reports every one.")
     p.add_argument("--reconnect", dest="reconnect", action="store_true",
                    default=True,
                    help="survive the robot's power being switched off: on a "
