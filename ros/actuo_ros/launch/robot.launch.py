@@ -49,6 +49,19 @@ def _shm_file(name):
         os.environ.get("ACTUO_SHM_PREFIX", "actuo_"), name))
 
 
+def _root_link(urdf_xml):
+    """The URDF's root link: the one no joint has as its child."""
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(urdf_xml)
+    children = {j.find("child").get("link") for j in root.findall("joint")}
+    roots = [link.get("name") for link in root.findall("link")
+             if link.get("name") not in children]
+    if len(roots) != 1:
+        raise RuntimeError("the URDF has {} root links: {}".format(len(roots), roots))
+    return roots[0]
+
+
 def _setup(context):
     config = os.path.abspath(LaunchConfiguration("config").perform(context))
     shm_name = (LaunchConfiguration("shm_name").perform(context)
@@ -76,6 +89,7 @@ def _setup(context):
                        ["ros__parameters"]["update_rate"])
     port = LaunchConfiguration("port").perform(context)
     rviz_config = LaunchConfiguration("rviz_config").perform(context)
+    ghost = LaunchConfiguration("ghost").perform(context).lower() == "true"
 
     servicer = Node(
         package="actuo_ros", executable="actuo_bus_node", output="screen",
@@ -103,6 +117,23 @@ def _setup(context):
              parameters=[{"robot_description": robot_description}],
              remappings=[("joint_states", "/state_merge/joint_states")]),
     ]
+    if ghost:
+        # Calibration ghost: the same URDF under the TF prefix ghost/, posed by
+        # /ghost/joint_states (actuo_calibrate publishes it), its root pinned
+        # to the robot's. Show it with a second RobotModel display whose TF
+        # prefix is "ghost", transparent, over the robot.
+        root = _root_link(robot_description)
+        control += [
+            Node(package="robot_state_publisher", executable="robot_state_publisher",
+                 name="ghost_state_publisher", namespace="ghost", output="log",
+                 parameters=[{"robot_description": robot_description,
+                              "frame_prefix": "ghost/"}],
+                 remappings=[("joint_states", "/ghost/joint_states")]),
+            Node(package="tf2_ros", executable="static_transform_publisher",
+                 name="ghost_root", output="log",
+                 arguments=["--frame-id", root, "--child-frame-id",
+                            "ghost/" + root]),
+        ]
     control += [
         Node(package="controller_manager", executable="spawner", output="screen",
              arguments=[name, "--service-call-timeout", "60"])
@@ -133,5 +164,10 @@ def generate_launch_description():
                                           "config's bus.transport.channel"),
         DeclareLaunchArgument("rviz_config", default_value="",
                               description="start RViz with this config"),
+        DeclareLaunchArgument("ghost", default_value="false",
+                              choices=["true", "false"],
+                              description="publish a calibration ghost (TF "
+                                          "prefix ghost/, posed by "
+                                          "/ghost/joint_states)"),
         OpaqueFunction(function=_setup),
     ])

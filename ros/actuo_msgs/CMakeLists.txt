@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/SetServo.action"
   "action/SetFreeDrive.action"
   "action/GuardedMove.action"
+  "action/SetOrigin.action"
   DEPENDENCIES builtin_interfaces std_msgs
 )
 

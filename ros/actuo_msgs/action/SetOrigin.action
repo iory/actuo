@@ -1,0 +1,24 @@
+# Declare the pose a joint is in right now to be `reference` rad: calibration.
+#
+# The servicer re-labels the joint's position in the actuator itself (a FEETECH
+# servo's EEPROM homing offset), so it survives a power cycle and the robot
+# config does not change. The joint does not move. A joint in free drive leaves
+# it; one holding torque holds at `reference` until its controller commands
+# that pose (re-sync it, as for enabling; actuo_ros.robot_interface does).
+#
+# Refused for a joint whose bus cannot re-label a position, a reference outside
+# the joint's envelope, or an offset the actuator cannot hold (the joint is too
+# far from that angle). A write whose effect does not read back leaves the
+# joint limp and reports the failure.
+
+# Goal
+string joint
+float64 reference          # rad
+---
+# Result
+bool ok
+string reason
+JointServoState[] joints    # state at the moment the request settled
+---
+# Feedback
+string stage

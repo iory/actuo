@@ -20,7 +20,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
-from actuo_msgs.action import GuardedMove, SetFreeDrive, SetServo
+from actuo_msgs.action import GuardedMove, SetFreeDrive, SetOrigin, SetServo
 from actuo_msgs.msg import JointServoState, ServoState
 
 from actuo.drivers.servo import JointServo, ServoSupervisor
@@ -117,6 +117,16 @@ class ServoNode:
             cancel_callback=lambda _goal: CancelResponse.REJECT,
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
+        # Calibration: re-label a joint's present pose (when the bus can).
+        self._origin = None
+        if callable(getattr(getattr(supervisor, "bus", None), "set_origin", None)):
+            self._origin = ActionServer(
+                self.node, SetOrigin, "~/set_origin",
+                execute_callback=self._execute_set_origin,
+                goal_callback=lambda _goal: GoalResponse.ACCEPT,
+                cancel_callback=lambda _goal: CancelResponse.REJECT,
+                callback_group=MutuallyExclusiveCallbackGroup(),
+            )
         # A separate service, not another field on SetServo: clearing a safety
         # latch and applying torque are different acts, and merging them is how
         # one gets performed while the operator believes they asked for the
@@ -197,6 +207,8 @@ class ServoNode:
     def destroy(self) -> None:
         self._action.destroy()
         self._guard_action.destroy()
+        if self._origin is not None:
+            self._origin.destroy()
         if self._free_drive is not None:
             self._free_drive.destroy()
         self.node.destroy_node()
@@ -237,6 +249,24 @@ class ServoNode:
         if result.ok:
             goal_handle.succeed()
         else:
+            goal_handle.abort()
+        return result
+
+    def _execute_set_origin(self, goal_handle):
+        request = goal_handle.request
+        result = SetOrigin.Result()
+        ok, reason = self.supervisor.set_origin(request.joint, request.reference)
+        result.ok = ok
+        result.reason = reason
+        result.joints = [_to_msg(self.supervisor, j)
+                         for j in self.supervisor.inspect(self._read_shm())]
+        if ok:
+            # WARN, not INFO: it rewrote the actuator's own calibration, which
+            # is the line to find when a robot's poses are off afterwards.
+            self.node.get_logger().warn("set_origin: {}".format(reason))
+            goal_handle.succeed()
+        else:
+            self.node.get_logger().warn("set_origin REFUSED: {}".format(reason))
             goal_handle.abort()
         return result
 

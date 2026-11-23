@@ -682,6 +682,68 @@ class ServoSupervisor:
         self._guard_at = None
         self._guard_done = move
 
+    def set_origin(self, joint: str, reference: float) -> Tuple[bool, str]:
+        """Declare the pose ``joint`` is in right now to be ``reference`` rad.
+
+        Needs a bus that can re-label a servo's position (``set_origin``; the
+        FEETECH bus writes the servo's EEPROM homing offset). The joint must be
+        a position joint, not in a guarded move, and ``reference`` inside its
+        envelope. A joint in free drive leaves it here. A joint holding torque
+        keeps holding, at ``reference`` in the new frame, until its controller
+        commands that pose -- its controller still commands the old frame's
+        number; a limp joint stays limp.
+        """
+        set_origin = getattr(self.bus, "set_origin", None)
+        if not callable(set_origin):
+            return False, "refusing: this bus cannot re-label a joint's position"
+        if joint not in self.joint_names:
+            return False, "refusing: no such joint {!r}".format(joint)
+        index = self.joint_names.index(joint)
+        if self.modes[index] is not OperatingMode.POSITION:
+            return False, "refusing: {} is not a position joint".format(joint)
+        if self._guard is not None and self._guard[0] == index:
+            return False, "refusing: {} is in a guarded move".format(joint)
+        limit = self._envelope(self.bus.actuators[index])
+        if limit is not None and not limit[0] <= reference <= limit[1]:
+            return False, ("refusing: {:+.4f} rad is outside {}'s envelope "
+                           "[{:+.4f}, {:+.4f}]".format(reference, joint, *limit))
+        held = joint in self._on
+        before = self._measured(index)
+        if index in self._free:
+            self._free.pop(index)
+            self._free_changed = True
+            if not self._free:
+                self._free_at = None
+        try:
+            result = set_origin(index, reference, held)
+        except ValueError as err:
+            # Refused before the offset was written: the frame is unchanged,
+            # so hold where it is, as when leaving free drive.
+            if held:
+                self._hold[index] = before
+                self._resync[index] = before
+                self._sent_at.pop(index, None)
+            return False, "refusing: {}".format(err)
+        except RuntimeError as err:
+            # The write may or may not have landed: do not hold a pose in a
+            # frame that may have changed. Limp is the honest state.
+            self._on.discard(joint)
+            self._hold.pop(index, None)
+            self._resync.pop(index, None)
+            return False, "{} not calibrated, and left limp: {}".format(joint, err)
+        self._sent_at.pop(index, None)
+        if held:
+            self._hold[index] = reference
+            self._resync[index] = reference
+        else:
+            self._hold.pop(index, None)
+        return True, ("{} was {:+.4f} rad and now reads {:+.4f} (homing offset {:+.0f} "
+                      "-> {:+.0f}){}".format(
+                          joint, before, reference, result["old_offset"],
+                          result["new_offset"],
+                          "; holding there until the controller commands it"
+                          if held else ""))
+
     @property
     def guarded_move_running(self) -> bool:
         return self._guard is not None
