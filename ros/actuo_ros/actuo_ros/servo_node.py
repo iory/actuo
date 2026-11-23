@@ -20,7 +20,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
-from actuo_msgs.action import SetServo
+from actuo_msgs.action import GuardedMove, SetFreeDrive, SetServo
 from actuo_msgs.msg import JointServoState, ServoState
 
 from actuo.drivers.servo import JointServo, ServoSupervisor
@@ -53,6 +53,8 @@ def _to_msg(supervisor: ServoSupervisor, joint: JointServo) -> JointServoState:
     names = sorted(joint.aux)
     msg.aux_names = names
     msg.aux_values = [float(joint.aux[k]) for k in names]
+    msg.free_drive = joint.free_drive
+    msg.resyncing = joint.resyncing
     return msg
 
 
@@ -88,6 +90,29 @@ class ServoNode:
         self._action = ActionServer(
             self.node, SetServo, "~/servo/set",
             execute_callback=self._execute,
+            goal_callback=lambda _goal: GoalResponse.ACCEPT,
+            cancel_callback=lambda _goal: CancelResponse.REJECT,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+        # Free drive is its own action rather than a SetServo field: it is a
+        # different act (out of the position loop, moved by hand) with its own
+        # refusals, and leaving it hands nothing back to the controller until
+        # the controller is re-synced.
+        self._free_drive = None
+        if getattr(supervisor, "free_drive", None) is not None:
+            self._free_drive = ActionServer(
+                self.node, SetFreeDrive, "~/free_drive/set",
+                execute_callback=self._execute_free_drive,
+                goal_callback=lambda _goal: GoalResponse.ACCEPT,
+                cancel_callback=lambda _goal: CancelResponse.REJECT,
+                callback_group=MutuallyExclusiveCallbackGroup(),
+            )
+        # A guarded move runs over many cycles; its goal waits on a future the
+        # loop completes (see spin_once) once the supervisor reports it done.
+        self._guard_future = None
+        self._guard_action = ActionServer(
+            self.node, GuardedMove, "~/guarded_move",
+            execute_callback=self._execute_guarded_move,
             goal_callback=lambda _goal: GoalResponse.ACCEPT,
             cancel_callback=lambda _goal: CancelResponse.REJECT,
             callback_group=MutuallyExclusiveCallbackGroup(),
@@ -134,6 +159,10 @@ class ServoNode:
     # --- the loop calls these ---------------------------------------------
 
     def spin_once(self) -> None:
+        if self._guard_future is not None and not self._guard_future.done():
+            move = self.supervisor.pop_guarded_move()
+            if move is not None:
+                self._guard_future.set_result(move)
         rclpy.spin_once(self.node, timeout_sec=0.0)
 
     def publish(self) -> None:
@@ -167,7 +196,66 @@ class ServoNode:
 
     def destroy(self) -> None:
         self._action.destroy()
+        self._guard_action.destroy()
+        if self._free_drive is not None:
+            self._free_drive.destroy()
         self.node.destroy_node()
+
+    async def _execute_guarded_move(self, goal_handle):
+        from rclpy.task import Future
+
+        request = goal_handle.request
+        result = GuardedMove.Result()
+        ok, reason = self.supervisor.start_guarded_move(
+            request.joint, request.displacement, request.velocity,
+            request.max_tracking_error, max_load=request.max_load or None,
+            backoff=request.backoff)
+        if not ok:
+            result.ok = False
+            result.reason = reason
+            self.node.get_logger().warn("guarded move REFUSED: {}".format(reason))
+            goal_handle.abort()
+            return result
+        self.node.get_logger().info(reason)
+        self._guard_future = Future()
+        move = await self._guard_future
+        self._guard_future = None
+        result.stopped = move.stopped
+        result.reason = move.reason
+        result.start_position = move.start
+        result.end_position = move.position
+        result.max_tracking_error = move.peak_error
+        result.max_load = move.peak_load
+        # Cut short (torque off, link lost) is not an answer to the question
+        # the move asked; resistance and arrival are.
+        result.ok = move.reason == "reached" or move.reason.startswith(
+            ("tracking error", "load"))
+        self.node.get_logger().info(
+            "guarded move of {}: {} at {:+.4f} rad (lag max {:.4f} rad, load "
+            "max {:.3f})".format(request.joint, move.reason, move.position,
+                                 move.peak_error, move.peak_load))
+        if result.ok:
+            goal_handle.succeed()
+        else:
+            goal_handle.abort()
+        return result
+
+    def _execute_free_drive(self, goal_handle):
+        request = goal_handle.request
+        result = SetFreeDrive.Result()
+        ok, reason = self.supervisor.set_free_drive(
+            joints=list(request.joints), enable=request.enable)
+        result.ok = ok
+        result.reason = reason
+        result.joints = [_to_msg(self.supervisor, j)
+                         for j in self.supervisor.inspect(self._read_shm())]
+        if ok:
+            self.node.get_logger().info("free drive: {}".format(reason))
+            goal_handle.succeed()
+        else:
+            self.node.get_logger().warn("free drive REFUSED: {}".format(reason))
+            goal_handle.abort()
+        return result
 
     # --- action -----------------------------------------------------------
 

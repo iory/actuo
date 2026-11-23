@@ -40,7 +40,11 @@ firmware = ["pyelftools"]
 # actuo.safety distance queries and the fast boolean collision path
 # (trimesh collision managers need python-fcl).
 safety = ["python-fcl"]
-all = ["actuo[kondo,dynamixel,feetech,can,usb,firmware,safety]"]
+# actuo.dynamics: gravity torques from the URDF (free drive). 0.4.0: inverse
+# dynamics returns the torque a joint must exert, and a zero-mass link weighs
+# nothing (https://github.com/iory/scikit-robot/pull/912).
+dynamics = ["scikit-robot>=0.4.0"]
+all = ["actuo[kondo,dynamixel,feetech,can,usb,firmware,safety,dynamics]"]
 test = ["pytest", "actuo[dynamixel,feetech,can,usb]"]   # plus rcb4 (actuo[kondo]) for the Kondo tests
 
 [project.scripts]

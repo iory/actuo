@@ -553,6 +553,138 @@ class RobotInterface(ROS2RobotInterfaceBase):
         """
         self._servo(False, joints, timeout)
 
+    def free_drive(self, joints=None, enable=True, timeout=10.0):
+        """Free drive on or off: move the joints by hand, their weight carried.
+
+        On: the servicer takes the joints out of their position loop and
+        carries them with its gravity model (they must hold torque already).
+        Off: they hold where they were left, and each controller is then
+        re-synced to the measured pose -- the same step as :meth:`servo_on` --
+        since a trajectory controller still commands where the joints were
+        when free drive began. Until that re-sync the servicer holds them.
+
+        Parameters
+        ----------
+        joints : list of str or None
+            ``None``: every joint of the controllers.
+        enable : bool
+        timeout : float
+            Seconds to wait for each answer.
+
+        Raises
+        ------
+        ServoRefused
+            With the servicer's reason, when it refuses.
+        """
+        from actuo_msgs.action import SetFreeDrive
+        if self._servo_ns is None:
+            raise RuntimeError('servo_ns is None: this interface has no servicer')
+        if getattr(self, '_free_drive_client', None) is None:
+            self._free_drive_client = ActionClient(
+                self, SetFreeDrive, self._servo_ns.rstrip('/') + '/free_drive/set')
+        client = self._free_drive_client
+        if not client.wait_for_server(timeout_sec=timeout):
+            raise RuntimeError(
+                'no {}/free_drive/set: is the servicer running with a free_drive '
+                'config?'.format(self._servo_ns))
+        if joints is None:
+            joints = [j for js in self._controller_joints.values() for j in js]
+        goal = SetFreeDrive.Goal(enable=enable, joints=list(joints))
+        handle = _wait_future(client.send_goal_async(goal), timeout,
+                              'free_drive/set', self.get_clock())
+        if not handle.accepted:
+            raise RuntimeError('free_drive/set refused the request')
+        result = _wait_future(handle.get_result_async(), timeout,
+                              'free_drive/set', self.get_clock()).result
+        if not result.ok:
+            raise ServoRefused(result.reason)
+        self.get_logger().info(result.reason)
+        if not enable:
+            self._resync(joints, timeout)
+
+    def _resync(self, joints, timeout):
+        """Send each controller of ``joints`` the measured pose (moves nothing)."""
+        controllers = sorted({self.controller_of(j) for j in joints})
+        self.update_robot_state(wait_until_update=True)
+        self._send_measured(controllers, {}, 0.1)
+        for name in controllers:
+            self.wait_interpolation(name, timeout)
+
+    def guarded_move(self, joint, displacement, velocity=0.1,
+                     max_tracking_error=0.08, max_load=0.0, backoff=0.0,
+                     timeout=None):
+        """Move one joint slowly until it gets there or meets resistance.
+
+        Run by the servicer, which checks every control cycle (see
+        ``actuo_msgs/action/GuardedMove``). Afterwards the joint holds where
+        the move left it; once it is still, its controller is re-synced to
+        the measured pose, as :meth:`servo_on` does.
+
+        Parameters
+        ----------
+        joint : str
+        displacement : float
+            rad, signed. The end must be inside the joint's envelope.
+        velocity : float
+            rad/s.
+        max_tracking_error : float
+            rad the joint may lag the goal before it counts as stopped.
+        max_load : float
+            Load (actuator units, fraction of full scale) in the direction of
+            travel that stops it; 0: not checked.
+        backoff : float
+            rad to back away from the obstruction after a stop.
+        timeout : float or None
+            Seconds to wait; None: the move's own duration plus 10 s.
+
+        Returns
+        -------
+        actuo_msgs.action.GuardedMove.Result
+            ``stopped`` says whether something resisted; ``end_position``
+            where.
+
+        Raises
+        ------
+        ServoRefused
+            When the servicer refuses or the move is cut short.
+        """
+        from actuo_msgs.action import GuardedMove
+        if self._servo_ns is None:
+            raise RuntimeError('servo_ns is None: this interface has no servicer')
+        if getattr(self, '_guard_client', None) is None:
+            self._guard_client = ActionClient(
+                self, GuardedMove, self._servo_ns.rstrip('/') + '/guarded_move')
+        if timeout is None:
+            timeout = abs(displacement) / velocity + 10.0
+        if not self._guard_client.wait_for_server(timeout_sec=10.0):
+            raise RuntimeError('no {}/guarded_move: is the servicer running?'.format(
+                self._servo_ns))
+        goal = GuardedMove.Goal(
+            joint=joint, displacement=float(displacement), velocity=float(velocity),
+            max_tracking_error=float(max_tracking_error),
+            max_load=float(max_load), backoff=float(backoff))
+        handle = _wait_future(self._guard_client.send_goal_async(goal), 10.0,
+                              'guarded_move', self.get_clock())
+        if not handle.accepted:
+            raise RuntimeError('guarded_move refused the request')
+        result = _wait_future(handle.get_result_async(), timeout,
+                              'guarded_move', self.get_clock()).result
+        if not result.ok:
+            raise ServoRefused(result.reason)
+        # Where the servicer holds it: the end, or backed off from the stop.
+        # Sending the measured pose instead would hand the controller the
+        # pose before the back-off, close enough to count as re-synced, and
+        # take the back-off away again.
+        sign = 1.0 if displacement > 0 else -1.0
+        held = (result.end_position - sign * backoff if result.stopped
+                else result.start_position + displacement)
+        self._wait_until_still([joint], STILL_TIMEOUT)
+        self.update_robot_state(wait_until_update=True)
+        controller = self.controller_of(joint)
+        self._send_measured([controller], {joint: held}, 0.1)
+        self.wait_interpolation(controller, 10.0)
+        return result
+
 
 def connect(servo_ns='/actuo_bus_servicer', load_meshes=True, model_class=None,
             namespace=None, interface_class=None, **kwargs):

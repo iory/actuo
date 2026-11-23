@@ -119,6 +119,11 @@ class JointServo:
     #: Whether the actuator answers (a hot-plug bus can say no), and why not.
     present: bool = True
     absence_reason: str = ""
+    #: In free drive: out of its position loop, carried by the gravity model.
+    free_drive: bool = False
+    #: Left free drive and holding where it was left, until the controller
+    #: commands that pose (see ServoSupervisor.set_free_drive).
+    resyncing: bool = False
 
     @property
     def mismatch(self) -> float:
@@ -154,7 +159,8 @@ class ServoSupervisor:
                  mode: OperatingMode = OperatingMode.POSITION,
                  velocity_threshold: float = 0.05,
                  command_filter=None, release_period: float = 0.0,
-                 max_velocity: Optional[Dict[str, float]] = None):
+                 max_velocity: Optional[Dict[str, float]] = None,
+                 free_drive=None, gravity=None):
         #: Optional last look at the command before it reaches the wire (an
         #: ``actuo.core.contracts.CommandFilter``). POSITION only, and that is
         #: not a limitation to lift later: such a filter judges a POSE, and in
@@ -283,6 +289,35 @@ class ServoSupervisor:
         # Joint index -> the position a held joint keeps while its slot is
         # unowned (see _unowned). Forgotten when the joint is released.
         self._hold: Dict[int, float] = {}
+        #: Free drive (``actuo.drivers.free_drive.FreeDrive``) and the gravity
+        #: model it needs: a callable taking ``{joint: angle}`` and returning
+        #: every bus joint's holding torque [N m] in bus order. Both or neither.
+        if (free_drive is None) != (gravity is None):
+            raise ValueError("free_drive needs a gravity model and vice versa")
+        if free_drive is not None and list(free_drive.joint_names) != self.joint_names:
+            raise ValueError("free_drive's joints {} are not this bus's {}, in "
+                             "order".format(free_drive.joint_names, self.joint_names))
+        self.free_drive = free_drive
+        self._gravity = gravity
+        # Joint index -> the mode its free-drive torque goes out in (CURRENT
+        # when the actuator takes a torque, else PWM). Present = in free drive.
+        self._free: Dict[int, OperatingMode] = {}
+        self._free_at: Optional[float] = None
+        # A free-drive transition that has not been written yet (see
+        # needs_service).
+        self._free_changed = False
+        # Joints that left free drive (or ran away) and hold where they were
+        # left until the controller commands that pose. A trajectory
+        # controller does not follow a joint moved by hand: its command is
+        # where the joint was when free drive began, and following it would
+        # throw the joint back there -- the enable hazard again.
+        # Joint index -> the pose it holds meanwhile.
+        self._resync: Dict[int, float] = {}
+        # (joint index, actuo.drivers.guarded_move.GuardedMove) while one runs.
+        self._guard = None
+        self._guard_at: Optional[float] = None
+        # The last guarded move that finished, until collected.
+        self._guard_done = None
 
     @property
     def default_enabled(self) -> List[str]:
@@ -304,6 +339,10 @@ class ServoSupervisor:
         and presses a button. There is no hazard in a wheel commanded zero.
         """
         self._on = set(self._default_on)
+        self._free.clear()
+        self._free_at = None
+        self._resync.clear()
+        self._end_guard("the link was lost")
 
     @property
     def enabled_joints(self) -> List[str]:
@@ -410,6 +449,8 @@ class ServoSupervisor:
                 aux={k: float(v) for k, v in (state.aux or {}).items()
                      if isinstance(v, (int, float))},
                 present=present, absence_reason=reason,
+                free_drive=i in self._free,
+                resyncing=i in self._resync,
             ))
         return out
 
@@ -475,6 +516,16 @@ class ServoSupervisor:
         # than going limp under a controller that merely stopped.
         values = [self._unowned(i, v) if name in self._on else v
                   for i, (name, v) in enumerate(zip(self.joint_names, values))]
+        # A joint in free drive is wherever the hand put it, and one waiting
+        # to re-sync holds where free drive left it; the controller's command
+        # is not where either is going. Shown to the filter as such.
+        for i in self._free:
+            values[i] = self._measured(i)
+        # Re-sync first, against the controller's own command: the guarded
+        # move writes its goal into `values`, and judged after that a joint
+        # it just stopped would read as already re-synced.
+        self._step_resync(values)
+        self._step_guard(values)
         if self.command_filter is not None:
             values = self._filtered(values)
         sent = [self._fence(self.bus.actuators[i], values[i], i)
@@ -491,8 +542,211 @@ class ServoSupervisor:
         for i, value in enumerate(sent):
             if value is not None and self.modes[i] is OperatingMode.POSITION:
                 self._hold[i] = value
-        self.bus.write_batch([None if value is None else self._command(i, value)
-                              for i, value in enumerate(sent)])
+        commands = [None if value is None else self._command(i, value)
+                    for i, value in enumerate(sent)]
+        if self._free:
+            for i, command in self._free_commands(now).items():
+                commands[i] = command
+        self.bus.write_batch(commands)
+        self._free_changed = False
+
+    @property
+    def needs_service(self) -> bool:
+        """Must :meth:`service` run this cycle even if no command changed?
+
+        A request/response bus is only written when the controller's command
+        or the torque set changes. Free drive changes neither: its torque is
+        recomputed from the measured pose every cycle, and entering or leaving
+        it switches the actuator's mode with the controller's command still
+        the same. Skipping those cycles left a joint in free drive with no
+        torque sent at all -- or, leaving it, with its last PWM duty still
+        applied.
+        """
+        # A held pose still being approached (the back-off after a guarded
+        # move, slowed by max_velocity) needs every cycle until it is reached.
+        approaching = any(abs(self._hold.get(i, held) - held) > 1e-9
+                          for i, held in self._resync.items())
+        return (bool(self._free) or self._free_changed or self._guard is not None
+                or approaching)
+
+    def _measured(self, index: int) -> float:
+        """Joint ``index``'s last measured angle, NaN if it never reported one."""
+        state = self.bus.last_state(self.bus.actuators[index].id)
+        if state is None or state.position is None:
+            return math.nan
+        return float(state.position)
+
+    def _step_resync(self, values: List[float]) -> None:
+        """Hold each re-syncing joint until the controller commands its pose.
+
+        ``values`` is changed in place: a joint whose controller is still more
+        than ``jump_threshold`` from the held pose is given the held pose; one
+        within it is handed back to the controller and leaves the set.
+        """
+        for i in sorted(self._resync):
+            name = self.joint_names[i]
+            if name not in self._on or i in self._free:
+                self._resync.pop(i, None)
+                continue
+            held = self._resync[i]
+            if math.isfinite(values[i]) and abs(values[i] - held) <= self.jump_threshold:
+                self._resync.pop(i, None)
+                self._filter_event = (
+                    "{}: the controller commands {:+.4f} rad, within {:.4f} of "
+                    "where it was left; following the controller "
+                    "again".format(name, values[i], self.jump_threshold))
+                continue
+            values[i] = held
+
+    def _free_commands(self, now: float) -> Dict[int, ActuatorCommand]:
+        """This cycle's free-drive commands, by joint index.
+
+        A joint that ran away leaves free drive here and holds where it is.
+        """
+        dt = 0.0 if self._free_at is None else now - self._free_at
+        self._free_at = now
+        positions = [self._measured(i) for i in range(len(self.joint_names))]
+        angles = {name: p for name, p in zip(self.joint_names, positions)
+                  if math.isfinite(p)}
+        hold = self._gravity(angles)
+        torques, runaway = self.free_drive.torques(
+            sorted(self._free), positions, hold, dt)
+        out: Dict[int, ActuatorCommand] = {}
+        for i, velocity in runaway:
+            self._leave_free_drive(i)
+            self._filter_event = (
+                "{} ran away in free drive ({:+.2f} rad/s, limit {:.2f}); it "
+                "left free drive and holds where it is".format(
+                    self.joint_names[i], velocity,
+                    self.free_drive.config.max_velocity))
+            out[i] = ActuatorCommand(mode=self.modes[i], position=positions[i])
+        for i, torque in torques.items():
+            # Its pose goes on being what it holds if it leaves free drive.
+            self._hold[i] = positions[i]
+            self._sent_at[i] = now
+            if self._free[i] is OperatingMode.CURRENT:
+                out[i] = ActuatorCommand(mode=OperatingMode.CURRENT, current=torque)
+            else:
+                out[i] = ActuatorCommand(mode=OperatingMode.PWM,
+                                         pwm=self.free_drive.duty(i, torque))
+        return out
+
+    def _leave_free_drive(self, index: int) -> None:
+        """Out of free drive, holding where the joint is, until re-synced."""
+        self._free.pop(index, None)
+        self._free_changed = True
+        if not self._free:
+            self._free_at = None
+        self._hold[index] = self._measured(index)
+        self._sent_at.pop(index, None)
+        self._resync[index] = self._hold[index]
+
+    def _step_guard(self, values: List[float]) -> None:
+        """Advance the guarded move one cycle, in ``values``.
+
+        Once it finishes, the joint holds where the move left it (the
+        backed-off pose after a stop) until the controller commands that pose,
+        as after free drive: the controller still commands where the move
+        began.
+        """
+        if self._guard is None:
+            return
+        index, move = self._guard
+        now = time.monotonic()
+        period = 0.0 if self._guard_at is None else now - self._guard_at
+        self._guard_at = now
+        state = self.bus.last_state(self.bus.actuators[index].id)
+        position = self._measured(index)
+        load = None
+        if state is not None and state.aux and "load" in state.aux:
+            load = float(state.aux["load"])
+        commanded = self._hold.get(index, position)
+        values[index] = move.step(commanded, position, load, now, period)
+        if move.done:
+            self._guard = None
+            self._guard_at = None
+            self._guard_done = move
+            self._resync[index] = move.target
+            values[index] = move.target
+            self._filter_event = "{}: guarded move {}: {} at {:+.4f} rad".format(
+                self.joint_names[index],
+                "STOPPED" if move.stopped else "done", move.reason, move.position)
+
+    def _end_guard(self, reason: str) -> None:
+        """Stop a running guarded move where its joint is."""
+        if self._guard is None:
+            return
+        index, move = self._guard
+        move.finish(self._measured(index), True, reason)
+        self._guard = None
+        self._guard_at = None
+        self._guard_done = move
+
+    @property
+    def guarded_move_running(self) -> bool:
+        return self._guard is not None
+
+    def pop_guarded_move(self):
+        """The last guarded move that finished, once; None if none did."""
+        move, self._guard_done = self._guard_done, None
+        return move
+
+    def start_guarded_move(self, joint: str, displacement: float, velocity: float,
+                           max_tracking_error: float,
+                           max_load: Optional[float] = None,
+                           backoff: float = 0.0, trip_duration: float = 0.06,
+                           settle_time: float = 0.5) -> Tuple[bool, str]:
+        """Move one joint slowly until it gets there or meets resistance.
+
+        See :class:`actuo.drivers.guarded_move.GuardedMove`. The joint must
+        hold torque in position mode and not be in free drive, and one move
+        runs at a time. The end must lie inside the joint's envelope: a move
+        that means to cross it would be stopped by the envelope, not by what
+        it was looking for. ``max_load`` needs an actuator that reports a
+        ``load``. Collect the outcome with :meth:`pop_guarded_move`.
+        """
+        from actuo.drivers.guarded_move import GuardedMove
+
+        if joint not in self.joint_names:
+            return False, "refusing: no such joint {!r}".format(joint)
+        index = self.joint_names.index(joint)
+        actuator = self.bus.actuators[index]
+        position = self._measured(index)
+        if self._guard is not None:
+            return False, "refusing: a guarded move of {} is running".format(
+                self.joint_names[self._guard[0]])
+        if joint not in self._on:
+            return False, "refusing: {} has no torque".format(joint)
+        if self.modes[index] is not OperatingMode.POSITION:
+            return False, "refusing: {} is not a position joint".format(joint)
+        if index in self._free:
+            return False, "refusing: {} is in free drive".format(joint)
+        if not math.isfinite(position):
+            return False, "refusing: {} has not reported its angle".format(joint)
+        start = self._resync.get(index, self._hold.get(index, position))
+        limit = self._envelope(actuator)
+        if limit is not None and not limit[0] <= start + displacement <= limit[1]:
+            return False, ("refusing: {} would end at {:+.4f} rad, outside its "
+                           "envelope [{:+.4f}, {:+.4f}]".format(
+                               joint, start + displacement, limit[0], limit[1]))
+        if max_load:
+            state = self.bus.last_state(actuator.id)
+            if state is None or not state.aux or "load" not in state.aux:
+                return False, ("refusing: {}'s actuator reports no load, so "
+                               "max_load cannot be checked".format(joint))
+        try:
+            move = GuardedMove(start, displacement, velocity, max_tracking_error,
+                               max_load, trip_duration, settle_time, backoff)
+        except ValueError as err:
+            return False, "refusing: {}".format(err)
+        # The move owns the joint now; the controller gets it back after a
+        # re-sync, as from free drive.
+        self._resync.pop(index, None)
+        self._guard = (index, move)
+        self._guard_at = None
+        self._guard_done = None
+        return True, "guarded move of {} by {:+.4f} rad at {:.3f} rad/s".format(
+            joint, displacement, velocity)
 
     def _rate_limit(self, index: int, value: float, now: float) -> float:
         """Hold a POSITION command to ``max_velocity`` from the last one sent."""
@@ -817,10 +1071,17 @@ class ServoSupervisor:
             return False, "refusing: {}".format(err.args[0])
 
         went_limp = [n for n in target if n in self._on]
+        if self._guard is not None and self.joint_names[self._guard[0]] in target:
+            self._end_guard("torque switched off")
         self._on.difference_update(target)
         for name in target:
-            self._hold.pop(self.joint_names.index(name), None)
-            self._sent_at.pop(self.joint_names.index(name), None)
+            index = self.joint_names.index(name)
+            self._hold.pop(index, None)
+            self._sent_at.pop(index, None)
+            self._free.pop(index, None)
+            self._resync.pop(index, None)
+        if not self._free:
+            self._free_at = None
 
         if not went_limp:
             return True, "already off: {}".format(", ".join(target))
@@ -833,6 +1094,91 @@ class ServoSupervisor:
     @property
     def all_off(self) -> bool:
         return not self._on
+
+    @property
+    def free_drive_joints(self) -> List[str]:
+        """Names in free drive, in joint order."""
+        return [n for i, n in enumerate(self.joint_names) if i in self._free]
+
+    def set_free_drive(self, joints: Optional[Sequence[str]] = None,
+                       enable: bool = True) -> Tuple[bool, str]:
+        """Free drive on or off for ``joints`` (default: every joint).
+
+        On: the joint leaves its position loop and is sent, every cycle, the
+        torque that holds it against gravity plus the free-drive terms (see
+        :mod:`actuo.drivers.free_drive`), so it can be moved by hand. Refused,
+        for all the requested joints, unless each holds torque, is a POSITION
+        joint with free-drive parameters, and its actuator takes a torque
+        (CURRENT) or a PWM duty with a ``stall_torque`` to convert by.
+
+        Off: the joint holds where it is. It does NOT go back to following the
+        controller at once: the controller still commands the pose the joint
+        had when free drive began, so it holds until the controller commands
+        within ``jump_threshold`` of where it was left -- re-sync the
+        controller to the robot, as for enabling.
+        """
+        if self.free_drive is None:
+            return False, "refusing: this servicer has no free_drive configured"
+        try:
+            target = self._resolve(joints)
+        except KeyError as err:
+            return False, "refusing: {}".format(err.args[0])
+        indices = [self.joint_names.index(n) for n in target]
+        if not enable:
+            left = [i for i in indices if i in self._free]
+            for i in left:
+                self._leave_free_drive(i)
+            if not left:
+                return True, "not in free drive: {}".format(", ".join(target))
+            return True, (
+                "free drive off for {}; holding where they are until the "
+                "controller commands that pose (re-sync it, as for enabling)"
+                .format(", ".join(self.joint_names[i] for i in left)))
+
+        problems = []
+        modes = {}
+        for i in indices:
+            name = self.joint_names[i]
+            actuator = self.bus.actuators[i]
+            supported = actuator.capabilities.modes
+            if name not in self._on:
+                problems.append("{} has no torque (enable it first)".format(name))
+            elif self._guard is not None and self._guard[0] == i:
+                problems.append("{} is in a guarded move".format(name))
+            elif self.modes[i] is not OperatingMode.POSITION:
+                problems.append("{} is a {} joint, not a position joint".format(
+                    name, self.modes[i].name))
+            elif self.free_drive.joint(i) is None:
+                problems.append("{} has no free_drive parameters".format(name))
+            elif not math.isfinite(self._measured(i)):
+                problems.append("{} has not reported its angle".format(name))
+            elif OperatingMode.CURRENT in supported:
+                modes[i] = OperatingMode.CURRENT
+            elif OperatingMode.PWM in supported:
+                if self.free_drive.joint(i).stall_torque is None:
+                    problems.append("{} is driven by PWM but its free_drive has "
+                                    "no stall_torque".format(name))
+                else:
+                    modes[i] = OperatingMode.PWM
+            else:
+                problems.append("{}'s actuator takes neither a torque nor a PWM "
+                                "duty".format(name))
+        if problems:
+            return False, "refusing: " + "; ".join(problems)
+        positions = [self._measured(i) for i in range(len(self.joint_names))]
+        started = []
+        for i in indices:
+            if i in self._free:
+                continue
+            self.free_drive.start(i, positions)
+            self._free[i] = modes[i]
+            self._free_changed = True
+            self._resync.pop(i, None)
+            started.append(self.joint_names[i])
+        if not started:
+            return True, "already in free drive: {}".format(", ".join(target))
+        return True, "free drive on for {}: move {} by hand".format(
+            ", ".join(started), "them" if len(started) > 1 else "it")
 
     def enable(self, shm, joints: Optional[Sequence[str]] = None,
                force: bool = False) -> Tuple[bool, str]:
