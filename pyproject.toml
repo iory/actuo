@@ -28,6 +28,9 @@ dependencies = [
 # rcb4.protocol (byte-level RCB-4 / ICS protocol) is in rcb4 0.2.0 and later.
 kondo = ["rcb4>=0.2.0"]
 dynamixel = ["dynamixel-sdk"]
+# FEETECH STS/SMS/HLS (feetech_sts): register map, sign-magnitude encoding and
+# current scale come from feetech-cli.
+feetech = ["feetech-cli>=0.1.9"]
 can = ["python-can", "gs_usb", "pyusb"]
 # Recover a wedged usb-serial adapter (actuo.drivers.usb_reset).
 usb = ["libusb1"]
@@ -37,8 +40,8 @@ firmware = ["pyelftools"]
 # actuo.safety distance queries and the fast boolean collision path
 # (trimesh collision managers need python-fcl).
 safety = ["python-fcl"]
-all = ["actuo[kondo,dynamixel,can,usb,firmware,safety]"]
-test = ["pytest", "actuo[dynamixel,can,usb]"]   # plus rcb4 (actuo[kondo]) for the Kondo tests
+all = ["actuo[kondo,dynamixel,feetech,can,usb,firmware,safety]"]
+test = ["pytest", "actuo[dynamixel,feetech,can,usb]"]   # plus rcb4 (actuo[kondo]) for the Kondo tests
 
 [project.scripts]
 actuo-air = "actuo.cli.air:main"
@@ -60,6 +63,7 @@ actuo-kondo-symbols = "actuo.cli.kondo_symbols:main"
 actuo-maxspeed = "actuo.cli.maxspeed:main"
 actuo-recalibrate = "actuo.cli.recalibrate:main"
 actuo-relay = "actuo.cli.relay:main"
+actuo-robot-files = "actuo.cli.robot_files:main"
 actuo-set-origin = "actuo.cli.set_origin:main"
 actuo-teach-limits = "actuo.cli.teach_limits:main"
 actuo-uart-relay-emulator = "actuo.cli.uart_relay_emulator:main"

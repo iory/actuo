@@ -6,7 +6,8 @@
 #
 #   kondo      rcb4.protocol (Kondo RCB-4mini / ARM-H7 wire protocol)
 #   dynamixel  dynamixel-sdk
+#   feetech    feetech-cli (FEETECH STS/SMS/HLS register map)
 #   can        python-can, gs_usb, pyusb
 #   usb        libusb1, for resetting a wedged USB-serial adapter
 #   safety     python-fcl, for a --command-filter that checks self-collision
--e @ACTUO_ROOT@[kondo,dynamixel,can,usb,safety]
+-e @ACTUO_ROOT@[kondo,dynamixel,feetech,can,usb,safety]
