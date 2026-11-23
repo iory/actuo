@@ -1,0 +1,21 @@
+name: test
+
+# The hardware-free test suite: drivers against fake transports, the servo
+# supervisor, free drive, the robot config. The ROS packages under ros/ are
+# not built here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1   # no moving major tag
+      - name: pytest
+        run: >
+          uv run --no-project --python 3.12
+          --with-editable '.[test,kondo,safety,feetech,dynamics]'
+          python -m pytest -q

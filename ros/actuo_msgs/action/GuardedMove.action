@@ -1,0 +1,30 @@
+# Move one joint slowly and stop as soon as something resists it: a hard stop,
+# a cable going taut, the table. Resistance shows as tracking error (the goal
+# advancing while the joint lags) and, where the actuator reports one, load.
+#
+# Run in the servicer's control loop, so the stop is decided every cycle, not
+# over ROS. Afterwards the joint holds where the move left it (the backed-off
+# pose after a stop) until its controller commands that pose; re-sync the
+# controller to the robot, as for enabling (actuo_ros.robot_interface does).
+
+# Goal
+string joint
+float64 displacement         # rad, signed; the end must be inside the envelope
+float64 velocity             # rad/s the goal advances at, > 0
+float64 max_tracking_error   # rad; stop when the joint lags the goal by more
+float64 max_load             # stop when the load pushing in the direction of
+                             # travel exceeds this (actuator's load units,
+                             # fraction of full scale); 0 = do not check
+float64 backoff              # rad to back away from the obstruction on a stop
+---
+# Result
+bool ok                      # false = refused, or cut short (torque off, ...)
+bool stopped                 # true = stopped by resistance (or cut short)
+string reason
+float64 start_position       # rad
+float64 end_position         # rad, where the joint was when it stopped/arrived
+float64 max_tracking_error   # rad, the largest lag seen
+float64 max_load             # largest load in the direction of travel
+---
+# Feedback
+string stage

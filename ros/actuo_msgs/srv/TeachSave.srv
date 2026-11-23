@@ -1,0 +1,6 @@
+# Stop recording and save what was recorded under this name (letters, digits,
+# '-' and '_'). An existing recording of that name is replaced.
+string name
+---
+bool success
+string message

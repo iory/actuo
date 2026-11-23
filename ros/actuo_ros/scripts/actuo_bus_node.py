@@ -476,6 +476,43 @@ def _expose_move_time_parameter(servo_node, bus):
           "(<=0 = the actuator's default)".format(node.get_name()), flush=True)
 
 
+def build_free_drive(config_path, joint_names, actuators):
+    """``{free_drive, gravity}`` for ServoSupervisor, or ``{}`` without one.
+
+    Built from the robot config's ``free_drive`` block (see
+    :func:`actuo.drivers.free_drive.free_drive_config`) and its URDF: the
+    gravity model needs the URDF's masses, so a config with free drive and
+    no ``urdf`` is refused rather than run with nothing to carry the arm.
+    """
+    from actuo.drivers.config import load_document
+    from actuo.drivers.free_drive import FreeDrive, free_drive_config
+
+    document = load_document(config_path)
+    config = free_drive_config(document, config_path)
+    if config is None:
+        return {}
+    if "urdf" not in document:
+        raise ValueError("{}: free_drive needs `urdf` for the gravity model".format(
+            config_path))
+    from actuo.drivers.robot_document import load_model
+    from actuo.dynamics.gravity import GravityModel
+
+    block = document["free_drive"]
+    model = GravityModel(load_model(document, config_path),
+                         unmounted_links=list(block.get("unmounted_links", [])),
+                         gravity=list(block.get("gravity", [0.0, 0.0, -9.81])),
+                         backend=str(block.get("backend", "numpy")))
+    envelopes = [getattr(getattr(a, "calibration", None), "position_limit", None)
+                 for a in actuators]
+    names = list(joint_names)
+    print("[actuo_bus_node] free drive available for {} (gravity model of {}, "
+          "{} backend)".format(", ".join(n for n in names if n in config.joints),
+                               document["urdf"], block.get("backend", "numpy")),
+          flush=True)
+    return {"free_drive": FreeDrive(config, names, envelopes),
+            "gravity": lambda angles: model.torques(angles, names)}
+
+
 def build_command_filter(spec, joint_names):
     """Import and build a ``CommandFilter`` from a ``module:factory`` string.
 
@@ -1177,7 +1214,9 @@ def run_real(args):
                  if m is OperatingMode.POSITION]),
             # Per joint `max_velocity` in the config: the fastest a position
             # command may move on the wire. See ServoSupervisor.
-            max_velocity=load_max_velocities(args.config))
+            max_velocity=load_max_velocities(args.config),
+            # Free drive, when the config has a `free_drive` block.
+            **build_free_drive(args.config, joint_names, bus.actuators))
 
         recovery = None
         if args.reconnect:
@@ -1420,7 +1459,10 @@ def run_real(args):
                         or on_key != last_on_key
                         or not np.array_equal(cmd_now, last_written_cmd,
                                               equal_nan=True)
-                        or (bus_needs_write is not None and bus_needs_write()))
+                        or (bus_needs_write is not None and bus_needs_write())
+                        # Free drive: a torque recomputed every cycle, and
+                        # mode switches with the command unchanged.
+                        or supervisor.needs_service)
                     if changed:
                         supervisor.service(shm)
                         last_written_cmd = np.array(cmd_now, copy=True)

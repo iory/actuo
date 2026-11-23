@@ -10,4 +10,5 @@
 #   can        python-can, gs_usb, pyusb
 #   usb        libusb1, for resetting a wedged USB-serial adapter
 #   safety     python-fcl, for a --command-filter that checks self-collision
--e @ACTUO_ROOT@[kondo,dynamixel,feetech,can,usb,safety]
+#   dynamics   scikit-robot, the gravity model of free drive
+-e @ACTUO_ROOT@[kondo,dynamixel,feetech,can,usb,safety,dynamics]

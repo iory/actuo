@@ -1,0 +1,9 @@
+# Play a saved recording back: free drive is left on the recorded joints (and
+# their controllers re-synced), the arm moves to where the recording starts,
+# then follows it. speed scales time (1.0 = as recorded, 0.5 = half speed);
+# 0 means 1.0. Returns once playback has started; follow it on ~/state.
+string name
+float64 speed
+---
+bool success
+string message

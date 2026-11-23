@@ -75,3 +75,9 @@ float64 effort            # N*m at the OUTPUT shaft. NaN unless the actuator's
 # unknown and `velocity` therefore is not.
 string[] aux_names
 float64[] aux_values
+
+# --- free drive (see action/SetFreeDrive.action) ----------------------------
+bool free_drive           # true = out of its position loop, moved by hand,
+                          # its weight carried by the gravity model
+bool resyncing            # true = left free drive and holds where it was
+                          # left, until the controller commands that pose

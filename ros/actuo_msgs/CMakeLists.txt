@@ -9,7 +9,13 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/JointServoState.msg"
   "msg/ServoState.msg"
+  "msg/TeachState.msg"
+  "srv/TeachSave.srv"
+  "srv/TeachPlay.srv"
+  "srv/TeachList.srv"
   "action/SetServo.action"
+  "action/SetFreeDrive.action"
+  "action/GuardedMove.action"
   DEPENDENCIES builtin_interfaces std_msgs
 )
 

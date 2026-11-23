@@ -1,0 +1,24 @@
+# Put joints in free drive (move them by hand, their weight carried by the
+# gravity model), or take them out of it.
+#
+# An action for the same reason as SetServo: refusal is a real outcome (a joint
+# with no torque, no free-drive parameters, or an actuator that takes neither a
+# torque nor a PWM duty) and must not be mistaken for success.
+#
+# Leaving free drive does not hand the joint back to its controller at once.
+# The joint holds where it was left until the controller commands that pose:
+# a trajectory controller still commands where the joint was when free drive
+# began, and following it would throw the joint back there. Re-sync the
+# controller to the robot, as for enabling (actuo_ros.robot_interface does).
+
+# Goal
+bool enable                # true = into free drive, false = out of it
+string[] joints            # empty = every joint
+---
+# Result
+bool ok
+string reason              # why it was refused, or what was done
+JointServoState[] joints    # state at the moment the request settled
+---
+# Feedback
+string stage
