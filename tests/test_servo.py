@@ -1012,6 +1012,23 @@ def test_a_wheel_reads_the_VELOCITY_slot_of_the_same_command_block():
     assert sent[1].velocity == pytest.approx(3.3)
 
 
+def test_a_current_joint_reads_the_EFFORT_slot_into_command_current():
+    """ActuatorCommand carries a torque in `current` (N*m), which is what the
+    CURRENT-mode actuators read; building it with any other field raised in
+    the first cycle a CURRENT joint was serviced."""
+    bus = RecordingBus([0.0, 0.0])
+    bus.actuators[1] = FakeActuator(105, modes=(OperatingMode.CURRENT,))
+    shm = FakeShm([0.0, 0.0])
+    sup = ServoSupervisor(bus, ["joint1", "joint2"], 0.05, STRIDE)
+    assert sup.modes[1] is OperatingMode.CURRENT
+    assert sup.enable(shm)[0] is True      # commanded 0 N*m: nothing to jump
+    shm._c[1 * STRIDE + 2] = 0.8           # the controller asks for 0.8 N*m
+    sup.service(shm)
+    sent = bus.commands[-1][1]
+    assert sent.mode is OperatingMode.CURRENT
+    assert sent.current == pytest.approx(0.8)
+
+
 def test_a_wheel_with_no_position_reports_NaN_rather_than_a_plausible_zero():
     sup, _, shm = mixed()
     wheel = sup.inspect(shm)[1]
