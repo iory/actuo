@@ -56,7 +56,7 @@ ament_uv_install_python_scripts(PROGRAMS ${_actuo_cli_wrappers} STRIP_PY_EXTENSI
 install(DIRECTORY udev DESTINATION share/${PROJECT_NAME} USE_SOURCE_PERMISSIONS)
 # Board data a robot config refers to, e.g.
 #   symbols: package://actuo_ros/config/kondoh7_v0.6.5_symbols.yaml
-install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   ament_uv_check_virtualenv()
