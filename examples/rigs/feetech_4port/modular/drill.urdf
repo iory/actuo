@@ -1,13 +1,27 @@
 <?xml version="1.0"?>
+<!-- The same arm (ids 1, 2: other joint names, elbow reversed and offset) with a
+     drill (id 4). Shapes only, for RViz. -->
 <robot name="drill">
-  <link name="base_link"/>
-  <link name="shoulder_pitch_link"/>
-  <joint name="shoulder_pitch" type="revolute"><parent link="base_link"/><child link="shoulder_pitch_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
-    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
-  <link name="elbow_pitch_link"/>
-  <joint name="elbow_pitch" type="revolute"><parent link="shoulder_pitch_link"/><child link="elbow_pitch_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
-    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
-  <link name="drill_spin_link"/>
-  <joint name="drill_spin" type="revolute"><parent link="elbow_pitch_link"/><child link="drill_spin_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
-    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+  <material name="arm"><color rgba="0.2 0.75 0.3 1"/></material>
+  <material name="tool"><color rgba="0.85 0.15 0.15 1"/></material>
+  <material name="base"><color rgba="0.4 0.4 0.4 1"/></material>
+  <link name="base_link">
+    <visual><origin xyz="0 0 0.01"/><geometry><box size="0.12 0.12 0.02"/></geometry><material name="base"/></visual>
+  </link>
+  <link name="shoulder_pitch_link">
+    <visual><origin xyz="0 0 0.06"/><geometry><cylinder radius="0.02" length="0.12"/></geometry><material name="arm"/></visual>
+  </link>
+  <joint name="shoulder_pitch" type="revolute"><parent link="base_link"/><child link="shoulder_pitch_link"/>
+    <origin xyz="0 0 0.02"/><axis xyz="0 1 0"/><limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+  <link name="elbow_pitch_link">
+    <visual><origin xyz="0 0 0.05"/><geometry><cylinder radius="0.018" length="0.10"/></geometry><material name="arm"/></visual>
+  </link>
+  <joint name="elbow_pitch" type="revolute"><parent link="shoulder_pitch_link"/><child link="elbow_pitch_link"/>
+    <origin xyz="0 0 0.12"/><axis xyz="0 1 0"/><limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+  <link name="drill_spin_link">
+    <visual><origin xyz="0 0 0.02"/><geometry><cylinder radius="0.025" length="0.04"/></geometry><material name="tool"/></visual>
+    <visual><origin xyz="0 0 0.08"/><geometry><cylinder radius="0.006" length="0.08"/></geometry><material name="tool"/></visual>
+  </link>
+  <joint name="drill_spin" type="revolute"><parent link="elbow_pitch_link"/><child link="drill_spin_link"/>
+    <origin xyz="0 0 0.10"/><axis xyz="0 0 1"/><limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
 </robot>

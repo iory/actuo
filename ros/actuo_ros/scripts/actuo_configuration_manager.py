@@ -35,6 +35,7 @@ import time
 
 import rclpy
 import yaml
+from controller_manager_msgs.msg import ControllerManagerActivity
 from controller_manager_msgs.srv import (
     ListHardwareComponents, SetHardwareComponentState, SwitchController)
 from lifecycle_msgs.msg import State
@@ -55,6 +56,9 @@ LATCHED = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
 CALL_TIMEOUT = 10.0
 #: Seconds between two looks at what should be up.
 PERIOD = 0.05
+#: Seconds a module's controllers are not asked for again, while the activity
+#: topic catches up with the last request.
+SETTLE = 0.5
 
 
 class ConfigurationManager(Node):
@@ -100,11 +104,18 @@ class ConfigurationManager(Node):
         self.wanted = None          # configuration the servicer runs
         self.present = set()        # joints whose servos answer (servicer's view)
         self.active = None          # configuration ros2_control runs
+        # controller_manager's own account of every controller and component,
+        # kept from its activity topic (published on every change).
+        self.controller_state = {}
+        self.component_state = None
+        self._asked = {}            # component -> when its controllers were last requested
         self.create_subscription(Configuration,
                                  self.get_parameter("configuration_topic").value,
                                  self._on_configuration, LATCHED, callback_group=group)
         self.create_subscription(ServoState, self.get_parameter("servo_state_topic").value,
                                  self._on_servo_state, LATCHED, callback_group=group)
+        self.create_subscription(ControllerManagerActivity, cm + "/activity",
+                                 self._on_activity, LATCHED, callback_group=group)
         threading.Thread(target=self._work, daemon=True).start()
 
     def _on_configuration(self, msg):
@@ -114,6 +125,11 @@ class ConfigurationManager(Node):
         with self._lock:
             if msg.name != self.wanted:
                 self.wanted, self.wanted_at = msg.name, time.monotonic()
+
+    def _on_activity(self, msg):
+        with self._lock:
+            self.controller_state = {c.name: c.state.id for c in msg.controllers}
+            self.component_state = {c.name: c.state.id for c in msg.hardware_components}
 
     def _on_servo_state(self, msg):
         with self._lock:
@@ -151,6 +167,17 @@ class ConfigurationManager(Node):
                             "list_hardware_components")
         return {c.name: c.state.id for c in result.component}
 
+    def _states(self):
+        """(component states, active controllers), from the activity topic; asked
+        for once if no activity has been heard yet."""
+        with self._lock:
+            components = self.component_state
+            controllers = dict(self.controller_state)
+        if components is None:
+            components = self._component_states()
+        running = {n for n, s in controllers.items() if s == State.PRIMARY_STATE_ACTIVE}
+        return components, running
+
     def _set_model(self, name):
         request = SetParameters.Request()
         request.parameters = [Parameter(
@@ -183,23 +210,27 @@ class ConfigurationManager(Node):
             self.active_pub.publish(String(data=wanted))
             self.get_logger().info("ros2_control runs {} ({:.3f} s after the servicer said so)"
                                    .format(wanted, time.monotonic() - self.wanted_at))
-        states = self._component_states()
+        states, running = self._states()
         for component, module in self.configurations[wanted]["modules"].items():
-            if states.get(component) == State.PRIMARY_STATE_ACTIVE:
+            if states.get(component) != State.PRIMARY_STATE_ACTIVE:
+                if not set(module["joints"]) <= present:
+                    continue                         # comes up when its servos answer
+                if not self._component(component, State.PRIMARY_STATE_ACTIVE, "active"):
+                    continue
+            # Up means its controllers too: a switch asked for before they were
+            # all loaded (start-up) activates some of them, or none.
+            missing = [c for c in module["controllers"] if c not in running]
+            if not missing or time.monotonic() - self._asked.get(component, 0.0) < SETTLE:
                 continue
-            if not set(module["joints"]) <= present:
-                continue                             # comes up when its servos answer
-            if not self._component(component, State.PRIMARY_STATE_ACTIVE, "active"):
-                continue
-            if self._switch_controllers(module["controllers"], []):
-                self.get_logger().info("{} up: {}".format(component,
-                                                          ", ".join(module["controllers"])))
+            self._asked[component] = time.monotonic()
+            if self._switch_controllers(missing, []):
+                self.get_logger().info("{} up: {}".format(component, ", ".join(missing)))
 
     def _leave_all_but(self, keep):
         others = [n for n in self.configurations if n != keep]
         controllers = [c for n in others for c in self.configurations[n]["controllers"]]
         self._switch_controllers([], controllers)
-        states = self._component_states()
+        states, _ = self._states()
         for n in others:
             for component in self.configurations[n]["components"]:
                 if states.get(component) == State.PRIMARY_STATE_ACTIVE:

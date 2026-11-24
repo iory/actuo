@@ -1,13 +1,27 @@
 <?xml version="1.0"?>
+<!-- An arm (ids 1, 2) with a gripper (id 3). Shapes only, for RViz. -->
 <robot name="gripper">
-  <link name="base_link"/>
-  <link name="arm_shoulder_link"/>
-  <joint name="arm_shoulder" type="revolute"><parent link="base_link"/><child link="arm_shoulder_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
-    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
-  <link name="arm_elbow_link"/>
-  <joint name="arm_elbow" type="revolute"><parent link="arm_shoulder_link"/><child link="arm_elbow_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
-    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
-  <link name="gripper_finger_link"/>
-  <joint name="gripper_finger" type="revolute"><parent link="arm_elbow_link"/><child link="gripper_finger_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
-    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+  <material name="arm"><color rgba="0.2 0.4 0.9 1"/></material>
+  <material name="tool"><color rgba="1.0 0.55 0.1 1"/></material>
+  <material name="base"><color rgba="0.4 0.4 0.4 1"/></material>
+  <link name="base_link">
+    <visual><origin xyz="0 0 0.01"/><geometry><box size="0.12 0.12 0.02"/></geometry><material name="base"/></visual>
+  </link>
+  <link name="arm_shoulder_link">
+    <visual><origin xyz="0 0 0.06"/><geometry><cylinder radius="0.02" length="0.12"/></geometry><material name="arm"/></visual>
+  </link>
+  <joint name="arm_shoulder" type="revolute"><parent link="base_link"/><child link="arm_shoulder_link"/>
+    <origin xyz="0 0 0.02"/><axis xyz="0 1 0"/><limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+  <link name="arm_elbow_link">
+    <visual><origin xyz="0 0 0.05"/><geometry><cylinder radius="0.018" length="0.10"/></geometry><material name="arm"/></visual>
+  </link>
+  <joint name="arm_elbow" type="revolute"><parent link="arm_shoulder_link"/><child link="arm_elbow_link"/>
+    <origin xyz="0 0 0.12"/><axis xyz="0 1 0"/><limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+  <link name="gripper_finger_link">
+    <visual><origin xyz="0.02 0 0.03"/><geometry><box size="0.01 0.03 0.06"/></geometry><material name="tool"/></visual>
+    <visual><origin xyz="-0.02 0 0.03"/><geometry><box size="0.01 0.03 0.06"/></geometry><material name="tool"/></visual>
+    <visual><origin xyz="0 0 0.005"/><geometry><box size="0.05 0.03 0.01"/></geometry><material name="tool"/></visual>
+  </link>
+  <joint name="gripper_finger" type="revolute"><parent link="arm_elbow_link"/><child link="gripper_finger_link"/>
+    <origin xyz="0 0 0.10"/><axis xyz="0 0 1"/><limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
 </robot>
