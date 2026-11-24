@@ -5,6 +5,7 @@
 robot: robot.yaml
 urdf: robot.urdf
 modes: [tool_change.yaml, reconfigurable.yaml]
+modular: modular/catalog.yaml   # actuo.modular configurations (tests/hardware/test_modular_hw.py)
 injector:
   plugin: servo_fault_injector
   # port: /dev/serial/by-id/usb-Raspberry_Pi_Pico_2_...   (found by VID when only one)

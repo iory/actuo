@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<robot name="drill">
+  <link name="base_link"/>
+  <link name="shoulder_pitch_link"/>
+  <joint name="shoulder_pitch" type="revolute"><parent link="base_link"/><child link="shoulder_pitch_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
+    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+  <link name="elbow_pitch_link"/>
+  <joint name="elbow_pitch" type="revolute"><parent link="shoulder_pitch_link"/><child link="elbow_pitch_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
+    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+  <link name="drill_spin_link"/>
+  <joint name="drill_spin" type="revolute"><parent link="elbow_pitch_link"/><child link="drill_spin_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
+    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+</robot>

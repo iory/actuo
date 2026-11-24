@@ -6,6 +6,7 @@ the injector, so a test can say "unplug the elbow" and mean it on any rig::
     robot: four.yaml          # actuo robot config (bus.hot_plug: true)
     urdf: four.urdf           # its model
     modes: [tool_change.yaml] # robot_modes descriptions to check (optional)
+    modular: catalog.yaml     # actuo.modular catalog to check (optional)
     injector:
       plugin: servo_fault_injector   # or ics_fault_relay
       port: /dev/serial/by-id/...    # optional when there is only one
@@ -65,6 +66,7 @@ class ServoRig:
     urdf: Optional[str] = None
     modes: List[str] = field(default_factory=list)
     drop_joints: Optional[List[str]] = None
+    modular: Optional[str] = None
     _unplugged: set = field(default_factory=set, init=False, repr=False)
 
     @classmethod
@@ -94,7 +96,8 @@ class ServoRig:
                    robot_config=robot_config, urdf=resolve(spec.get("urdf")),
                    modes=[resolve(m) for m in spec.get("modes") or ()],
                    drop_joints=(None if spec.get("drop_joints") is None
-                                else [str(j) for j in spec["drop_joints"]]))
+                                else [str(j) for j in spec["drop_joints"]]),
+                   modular=resolve(spec.get("modular")))
 
     def __post_init__(self) -> None:
         if self.drop_joints is None:
@@ -142,6 +145,15 @@ class ServoRig:
             self.injector.require(UNPLUG_MANY)
         self.plug(*[j for j in self.targets if j in wanted and j in self._unplugged])
         self.unplug(*[j for j in off if j not in self._unplugged])
+
+    def only_ids(self, ids: Iterable[int]) -> None:
+        """Leave exactly the servos with these ids plugged in (by the robot
+        config's ids), whichever joint names a configuration gives them."""
+        by_id = {i: j for j, i in self.servo_ids.items() if j in self.targets}
+        unknown = set(ids) - set(by_id)
+        if unknown:
+            raise KeyError("ids not on this rig: {}".format(sorted(unknown)))
+        self.only([by_id[i] for i in ids])
 
     def drop_replies(self, joint: str) -> None:
         """The joint's servo still gets commands but its replies are cut."""

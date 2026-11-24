@@ -136,15 +136,30 @@ class ActuoRobotInterface(RobotInterfaceBase):
         constructor returns; the others are attached whenever they answer.
         Default: none. Only a hot-plug bus accepts it: on any other bus every
         joint is required.
+    bus_overrides : dict, optional
+        Entries added to the config's ``bus`` block (see
+        :func:`actuo.drivers.config.build_bus`).
+    hold_joints : sequence of str, optional
+        Joints whose servos already hold torque -- left on by another
+        interface that closed without releasing them (``close`` leaves torque
+        as it is) -- and that must keep it. They are required at start and
+        switched on at their measured pose before the first write, which would
+        otherwise switch every joint that is not on off. This is how
+        :class:`actuo.modular.ModularRobot` changes configuration without
+        dropping an arm. The usual ``servo_on`` checks apply; a joint they
+        refuse makes the constructor raise.
     """
 
     def __init__(self, robot, config: str, rate: float = 50.0,
                  jump_threshold: float = 0.05,
                  transport_overrides: Optional[dict] = None,
                  startup_timeout: float = 5.0,
-                 required_joints: Optional[Sequence[str]] = None):
+                 required_joints: Optional[Sequence[str]] = None,
+                 bus_overrides: Optional[dict] = None,
+                 hold_joints: Optional[Sequence[str]] = None):
         self.period = 1.0 / rate
-        self.bus, self.bus_joints = build_bus(config, transport_overrides)
+        self.bus, self.bus_joints = build_bus(config, transport_overrides,
+                                              bus_overrides)
         set_names = getattr(self.bus, "set_joint_names", None)
         if callable(set_names):
             set_names(self.bus_joints)
@@ -196,13 +211,26 @@ class ActuoRobotInterface(RobotInterfaceBase):
         verify = getattr(self.bus, "verify_servos", None)
         if callable(verify):
             verify()
+        hold = list(hold_joints or ())
+        unknown_hold = [n for n in hold if n not in self._index]
+        if unknown_hold:
+            raise KeyError("hold_joints not in the config: {}".format(
+                ", ".join(unknown_hold)))
         if self.hot_plug:
-            required = list(required_joints or ())
+            required = list(required_joints or ()) + hold
         else:
             required = list(self.bus_joints)
-        self._wait_until_attached(
-            [self._index[n] for n in required
-             if n in self._position_joints], startup_timeout)
+        try:
+            self._wait_until_attached(
+                [self._index[n] for n in dict.fromkeys(required)
+                 if n in self._position_joints], startup_timeout)
+            if hold:
+                # Before the service thread's first write: that write would
+                # release every joint that is not on.
+                self._set_servo(hold, True)
+        except BaseException:
+            self.bus.transport.close()
+            raise
         self._running = True
         self._thread = threading.Thread(target=self._run, name="actuo-ri",
                                         daemon=True)

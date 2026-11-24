@@ -365,3 +365,35 @@ def test_the_config_turns_hot_plug_on_for_a_feetech_bus(tmp_path):
     bus, names = build_bus(str(path))
     assert isinstance(bus, FeetechBus) and names == ["j1", "j3"]
     assert bus.hot_plug and bus.absent_after_misses == 5
+
+
+def test_watched_ids_are_pinged_in_turn_and_reported(tmp_path):
+    bus, line = make_hot_bus({1: state_block()}, [1], presence_period=1,
+                             watch_ids=[1, 5, 7])
+    assert bus.watch_ids == (5, 7)                  # its own id is not "watched"
+    bus.verify_servos()
+    plug(line, 5)
+    line.written.clear()
+    bus.read_batch()
+    bus.read_batch()
+    pings = [p[2] for p in line.written if p[4] == fp.PING]
+    assert pings == [5, 7]
+    assert bus.watched(5) and not bus.watched(7)
+    assert bus.answering_ids() == [1, 5]
+    del line.servos[5]
+    bus.read_batch()                                # 5 again: gone
+    assert bus.answering_ids() == [1]
+
+
+def test_bus_overrides_reach_the_feetech_bus(tmp_path):
+    from actuo.drivers.config import build_bus
+
+    path = tmp_path / "robot.yaml"
+    path.write_text(
+        "bus:\n"
+        "  transport: {plugin: serial, channel: /dev/null, bitrate: 1000000}\n"
+        "joints:\n"
+        "  - name: j1\n"
+        "    actuator: {plugin: feetech_sts, id: 1, model: STS3215}\n")
+    bus, _ = build_bus(str(path), bus_overrides={"hot_plug": True, "watch_ids": [2, 3]})
+    assert bus.hot_plug and bus.watch_ids == (2, 3)

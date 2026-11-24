@@ -1,0 +1,8 @@
+# Two robots made of the same arm: ids 1 and 2 are in both, under other joint
+# names and calibration; id 3 (a gripper) or id 4 (a drill) says which.
+configurations:
+  gripper: {robot: gripper.yaml, urdf: gripper.urdf}
+  drill: {robot: drill.yaml, urdf: drill.urdf}
+default: gripper
+select: detect
+hold: same_id

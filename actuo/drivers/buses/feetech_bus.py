@@ -99,6 +99,12 @@ class FeetechBus(Bus):
         absent servo (one servo per probe, in turn).
     probe_timeout : float
         Seconds to wait for an absent servo's reply to its probe.
+    watch_ids : sequence of int
+        Ids that are not this bus's servos but whose presence is wanted -- the
+        servos of another configuration of a modular robot
+        (:mod:`actuo.modular`). Each gets a PING in the same rotation as the
+        absent servos (every ``presence_period`` reads, one id per turn), and
+        :meth:`answering_ids` reports them. They are never written.
     """
 
     def __init__(self, transport, actuators, read_timeout: float = 0.05,
@@ -107,7 +113,8 @@ class FeetechBus(Bus):
                  hot_plug: bool = False,
                  absent_after_misses: int = DEFAULT_ABSENT_AFTER_MISSES,
                  presence_period: int = DEFAULT_PRESENCE_PERIOD,
-                 probe_timeout: float = DEFAULT_PROBE_TIMEOUT) -> None:
+                 probe_timeout: float = DEFAULT_PROBE_TIMEOUT,
+                 watch_ids: Sequence[int] = ()) -> None:
         super().__init__(transport, actuators)
         for actuator in self.actuators:
             if not isinstance(actuator, FeetechStsActuator):
@@ -122,6 +129,9 @@ class FeetechBus(Bus):
         self.absent_after_misses = int(absent_after_misses)
         self.presence_period = int(presence_period)
         self.probe_timeout = float(probe_timeout)
+        own = {int(a.id) for a in self.actuators}
+        self.watch_ids = tuple(sorted({int(i) for i in watch_ids} - own))
+        self._watched: Dict[int, bool] = {}
         # Hot-plug bookkeeping: who is present, why the others are not, and
         # which absent servo the next probe asks.
         self._present: Dict[int, bool] = {}
@@ -371,21 +381,48 @@ class FeetechBus(Bus):
                 self._consecutive_misses[actuator.id] = 0
             states.append(self._states.get(actuator.id))
         self._reads += 1
-        if self.hot_plug and self._reads % self.presence_period == 0:
-            self._probe_absent()
+        if ((self.hot_plug or self.watch_ids)
+                and self._reads % self.presence_period == 0):
+            self._probe_next()
         return states
 
-    def _probe_absent(self) -> None:
-        """Ask one absent servo, in turn, whether it is back; check it if so.
+    def _probe_next(self) -> None:
+        """Probe the next absent servo or watched id, in turn (one per call)."""
+        absent = ([a for a in self.actuators if not self.present(a.id)]
+                  if self.hot_plug else [])
+        turn = absent + list(self.watch_ids)
+        if not turn:
+            return
+        item = turn[self._probe_turn % len(turn)]
+        self._probe_turn += 1
+        if isinstance(item, int):
+            self._probe_watched(item)
+        else:
+            self._probe_absent(item)
+
+    def _probe_watched(self, servo_id: int) -> None:
+        """PING a watched id and record whether it answered."""
+        reply = self.transport.transact(
+            [Frame(payload=fp.build_ping(servo_id), address=servo_id)],
+            self.probe_timeout)[0]
+        self._watched[servo_id] = reply is not None
+
+    def watched(self, servo_id: int) -> bool:
+        """Whether a watched id answered its last PING (False before the first)."""
+        return self._watched.get(int(servo_id), False)
+
+    def answering_ids(self) -> List[int]:
+        """Every id known to answer now: present servos and watched ids."""
+        ids = {a.id for a in self.actuators if self.present(a.id)}
+        ids.update(i for i, seen in self._watched.items() if seen)
+        return sorted(ids)
+
+    def _probe_absent(self, actuator: FeetechStsActuator) -> None:
+        """Ask one absent servo whether it is back; check it if so.
 
         A servo that answers is checked like at start-up before it counts as
         present; one of another model stays absent with the reason recorded.
         """
-        absent = [a for a in self.actuators if not self.present(a.id)]
-        if not absent:
-            return
-        actuator = absent[self._probe_turn % len(absent)]
-        self._probe_turn += 1
         reply = self.transport.transact(actuator.encode_facts_query(),
                                         self.probe_timeout)[0]
         if reply is None:

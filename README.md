@@ -72,6 +72,38 @@ the attached joints; naming a detached joint is an error. A servo that stops
 answering is switched off, its motion is dropped and its measurement becomes
 NaN, so when it is plugged back in it comes back limp, from where it then is.
 
+### One robot, several robots: `actuo.modular`
+
+A modular robot can be several robots: other joints, other names, other
+calibration, another model, even when some servos are the same. Each is a
+**configuration** (an ordinary robot config and its URDF), listed in a catalog,
+and `ModularRobot` runs whichever is current:
+
+```python
+from actuo.modular import ModularRobot
+
+mr = ModularRobot("catalog.yaml", on_change=lambda s: print(s.configuration))
+mr.ri.servo_on()             # the current configuration's ActuoRobotInterface
+mr.robot                     # ... and its skrobot model
+mr.declare("drill")          # same servos, another robot: say which
+mr.resume_detection()        # or let the servos that answer decide again
+```
+
+- **detect**: the configuration all of whose ids answer becomes current (the
+  largest when several are complete; two complete of one size is a conflict,
+  reported, and the robot stays as it is).
+- **declare**: whoever drives the robot names it, for configurations with the
+  same servos.
+- A switch keeps the arm up: servos that held torque and are in the next
+  configuration keep it under their new joint names (`hold_joints`), at their
+  measured pose; the others are released first. Every model is loaded at
+  start. On `examples/rigs/feetech_4port/modular` (ids 1 and 2 shared under
+  other names and calibration) a switch took 18-39 ms, detection noticed the
+  servos change within about 1.3 s, and held servos did not move by one count.
+
+FEETECH buses only for now: detection needs the bus to see ids outside the
+current configuration (`watch_ids`).
+
 ### Testing it on hardware: fault injectors and rigs
 
 `actuo.testing` makes servos come and go on purpose, so a robot that is

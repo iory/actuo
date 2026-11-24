@@ -27,7 +27,7 @@ from actuo.core.contracts import Frame, Transport
 from actuo.core.registry import register_transport
 
 from actuo.drivers.kondo_h7_protocol import ChecksumError, ProtocolError, frame, unframe
-from actuo.drivers.transports.exclusive_serial import open_exclusive
+from actuo.drivers.transports.exclusive_serial import close_exclusive, open_exclusive
 
 #: The H7 firmware's host-side UART runs at 1 Mbit/s.
 DEFAULT_BITRATE = 1_000_000
@@ -71,7 +71,7 @@ class KondoH7Transport(Transport):
     def close(self) -> None:
         if self._serial is not None:
             try:
-                self._serial.close()
+                close_exclusive(self._serial)
             finally:
                 self._serial = None
 

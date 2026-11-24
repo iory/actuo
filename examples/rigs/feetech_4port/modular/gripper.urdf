@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<robot name="gripper">
+  <link name="base_link"/>
+  <link name="arm_shoulder_link"/>
+  <joint name="arm_shoulder" type="revolute"><parent link="base_link"/><child link="arm_shoulder_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
+    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+  <link name="arm_elbow_link"/>
+  <joint name="arm_elbow" type="revolute"><parent link="arm_shoulder_link"/><child link="arm_elbow_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
+    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+  <link name="gripper_finger_link"/>
+  <joint name="gripper_finger" type="revolute"><parent link="arm_elbow_link"/><child link="gripper_finger_link"/><origin xyz="0 0 0.05"/><axis xyz="0 1 0"/>
+    <limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+</robot>
