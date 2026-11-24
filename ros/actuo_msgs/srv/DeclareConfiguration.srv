@@ -1,0 +1,6 @@
+# Make a configuration the robot now, whatever servos answer; detection stops
+# until an empty name is declared, which resumes it.
+string name
+---
+bool success
+string message

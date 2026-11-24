@@ -7,9 +7,11 @@ find_package(builtin_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/Configuration.msg"
   "msg/JointServoState.msg"
   "msg/ServoState.msg"
   "msg/TeachState.msg"
+  "srv/DeclareConfiguration.srv"
   "srv/TeachSave.srv"
   "srv/TeachPlay.srv"
   "srv/TeachList.srv"

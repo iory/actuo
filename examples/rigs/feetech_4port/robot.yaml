@@ -1,0 +1,20 @@
+# id N on PORT N (renumbered with servo-fault-injector host/assign_ids.py).
+bus:
+  transport:
+    plugin: serial
+    channel: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B91044152-if00
+    bitrate: 1000000
+  hot_plug: true
+# HLS3950M ids 3 and 4 rest in the middle of their turn: their homing_offset
+# is in their EEPROM (2039 and 2047, FeetechBus.set_origin / feetech write,
+# 2026-11-24), so offset_deg is 0. Left at the factory 0 they rested at the
+# end of the turn (raw 4087 and 2), where a goal one way is outside 0..4095.
+joints:
+  - name: j1
+    actuator: {plugin: feetech_sts, id: 1, model: STS3215}
+  - name: j2
+    actuator: {plugin: feetech_sts, id: 2, model: STS3215}
+  - name: j3
+    actuator: {plugin: feetech_sts, id: 3, model: HLS3950M, offset_deg: 0.0}
+  - name: j4
+    actuator: {plugin: feetech_sts, id: 4, model: HLS3950M, offset_deg: 0.0}

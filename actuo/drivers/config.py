@@ -764,7 +764,8 @@ def joints_with_servo_map(document: Dict[str, Any], path: str
 
 
 def build_bus(
-    path: str, transport_overrides: "Dict[str, Any] | None" = None
+    path: str, transport_overrides: "Dict[str, Any] | None" = None,
+    bus_overrides: "Dict[str, Any] | None" = None,
 ) -> Tuple[Bus, List[str]]:
     """Build the bus and its joint order from a robot config file.
 
@@ -780,9 +781,15 @@ def build_bus(
         duplicating the joint map per platform would create two sources of
         truth that drift apart. Only the
         transport can be overridden -- calibration must come from the file.
+    bus_overrides : dict, optional
+        Keys added to or replacing entries of the ``bus`` block (not its
+        transport), e.g. ``{"watch_ids": [4, 5]}`` from
+        :class:`actuo.modular.ModularRobot`, which knows the ids of the robot's
+        other configurations while each config file knows only its own.
     """
     document = load_document(path)
     bus_spec = dict(_require(document, "bus", path))
+    bus_spec.update(bus_overrides or {})
     transport_spec = dict(_require(bus_spec, "transport", "bus"))
     transport_spec.update(transport_overrides or {})
 
@@ -878,12 +885,23 @@ def build_bus(
             transport, actuators,
             read_timeout=float(bus_spec.get("read_timeout", 0.05)))
     elif bus_plugin == "feetech_bus":
-        from actuo.drivers.buses.feetech_bus import FeetechBus
+        from actuo.drivers.buses.feetech_bus import (
+            DEFAULT_ABSENT_AFTER_MISSES as FEETECH_DEFAULT_ABSENT_AFTER_MISSES,
+            DEFAULT_PRESENCE_PERIOD as FEETECH_DEFAULT_PRESENCE_PERIOD,
+            DEFAULT_PROBE_TIMEOUT as FEETECH_DEFAULT_PROBE_TIMEOUT, FeetechBus)
         bus = FeetechBus(
             transport, actuators,
             read_timeout=float(bus_spec.get("read_timeout", 0.05)),
             use_sync_read=bool(bus_spec.get("use_sync_read", True)),
-            reset_torque_limit=bool(bus_spec.get("reset_torque_limit", True)))
+            reset_torque_limit=bool(bus_spec.get("reset_torque_limit", True)),
+            hot_plug=bool(bus_spec.get("hot_plug", False)),
+            absent_after_misses=int(bus_spec.get(
+                "absent_after_misses", FEETECH_DEFAULT_ABSENT_AFTER_MISSES)),
+            presence_period=int(bus_spec.get(
+                "presence_period", FEETECH_DEFAULT_PRESENCE_PERIOD)),
+            probe_timeout=float(bus_spec.get(
+                "probe_timeout", FEETECH_DEFAULT_PROBE_TIMEOUT)),
+            watch_ids=tuple(int(i) for i in bus_spec.get("watch_ids", ())))
     elif bus_plugin == "dynamixel_bus":
         from actuo.drivers.buses.dynamixel_bus import DynamixelBus
         bus = DynamixelBus(

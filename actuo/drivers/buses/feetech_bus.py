@@ -12,6 +12,38 @@ Start-up (:meth:`verify_servos`) reads each servo's model number, homing offset
 and operating mode once. A servo that does not answer, or is not the model the
 config names, stops the start-up; a servo left out of position mode (by a
 process that died in PWM free drive) is put back into it, torque off.
+
+Servos that come and go (``hot_plug``)
+--------------------------------------
+For a robot whose modules are plugged together at run time, servos may be
+missing at start and may leave and come back. A servo is **present** once it
+has answered and passed the start-up check above; it becomes **absent** after
+``absent_after_misses`` SYNC_READs in a row without its reply (one lost packet
+is not a missing module). :meth:`FeetechBus.present` and
+:meth:`FeetechBus.absence_reason` say which and why, the same interface the
+RCB-4mini bus offers, so :class:`~actuo.robot_interface.ActuoRobotInterface`
+and the servo supervisor attach and detach joints from it.
+
+An absent servo is left out of the cycle's SYNC_READ: kept in, every cycle
+would wait the whole read timeout for its reply, and a robot with modules
+missing would run slower the more were missing. Instead one absent servo, in
+turn, gets its own READ every ``presence_period`` reads, with the short
+``probe_timeout``. A servo that answers there is checked like at start-up
+(model, homing offset, position mode, torque limit) before it counts as
+present -- a servo that lost power is back at its EEPROM settings, and a
+module of another model plugged into the same id is refused (it stays absent,
+and :meth:`absence_reason` names the model) rather than driven.
+
+An absent servo is never sent a goal or an enable, only torque off, so one
+that comes back arrives limp; whoever drives the bus decides when it holds.
+
+Checked on 2026-11-24 with two STS3215 (ids 1, 2) and two HLS3950M (ids 3, 4)
+at 1 Mbit/s, each on its own port of a servo-fault-injector board
+(iory/servo-fault-injector) that switches a port's power or signal: through
+:class:`~actuo.robot_interface.ActuoRobotInterface`, a servo whose power or
+signal was cut was detached within 0.10-0.15 s, and one switched back on was
+attached again within 0.95-1.10 s (probe turn, start-up check, then the
+interface's own attach cycles).
 """
 
 from __future__ import annotations
@@ -20,7 +52,7 @@ import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from actuo.core.contracts import (
-    ActuatorCommand, ActuatorState, Bus, Frame, OperatingMode)
+    ActuatorCommand, ActuatorState, Bus, CapabilityError, Frame, OperatingMode)
 from actuo.core.diagnostics import DiagItem, DiagLevel
 from actuo.drivers import feetech_protocol as fp
 from actuo.drivers.actuators.feetech_sts import (
@@ -29,6 +61,34 @@ from actuo.drivers.actuators.feetech_sts import (
 from feetech_cli.registers import CONTROL_TABLE
 
 _TORQUE_ENABLE = CONTROL_TABLE["torque_enable"].address
+
+#: Counts an HLS origin may land away from the pose asked for (set_origin).
+HLS_ORIGIN_SLACK = 16
+
+
+def hls_homing_offset(raw: int, target: int, max_offset: int,
+                      resolution: int) -> Tuple[int, int]:
+    """``(homing_offset, landed count)`` that makes ``raw`` read near ``target``
+    on an HLS servo.
+
+    An HLS takes a negative homing offset into its register and ignores it: an
+    HLS3950M given -2046 read it back as -2046 and went on reading the same
+    position (2026-11-24); 2047 took effect at once. ``present = (raw - offset)
+    mod resolution`` with the offset in ``0..max_offset``, so a pose that needs
+    a negative offset gets the largest one, and lands that many counts away.
+    """
+    new = raw - target
+    if new >= 0:
+        return new, target
+    return max_offset, (raw - max_offset) % resolution
+
+
+#: SYNC_READs in a row without a reply that make a hot-plug servo absent.
+DEFAULT_ABSENT_AFTER_MISSES = 3
+#: read_batch calls between probes of an absent servo.
+DEFAULT_PRESENCE_PERIOD = 10
+#: Seconds an absent servo's probe waits: one reply at 1 Mbit/s plus USB latency.
+DEFAULT_PROBE_TIMEOUT = 0.01
 
 
 class FeetechBus(Bus):
@@ -48,11 +108,34 @@ class FeetechBus(Bus):
     reset_torque_limit : bool
         At start-up, set every servo's torque_limit (SRAM 48) back to full: a
         process that died in free drive leaves it lowered.
+    hot_plug : bool
+        Servos may be absent at start and may come and go (see the module
+        docstring). Without it a servo that does not answer at start-up is an
+        error, and one that stops answering keeps its last state.
+    absent_after_misses : int
+        With ``hot_plug``, SYNC_READs in a row without a servo's reply that
+        make it absent.
+    presence_period : int
+        With ``hot_plug``, ``read_batch`` calls between two probes of an
+        absent servo (one servo per probe, in turn).
+    probe_timeout : float
+        Seconds to wait for an absent servo's reply to its probe.
+    watch_ids : sequence of int
+        Ids that are not this bus's servos but whose presence is wanted -- the
+        servos of another configuration of a modular robot
+        (:mod:`actuo.modular`). Each gets a PING in the same rotation as the
+        absent servos (every ``presence_period`` reads, one id per turn), and
+        :meth:`answering_ids` reports them. They are never written.
     """
 
     def __init__(self, transport, actuators, read_timeout: float = 0.05,
                  use_sync_read: bool = True,
-                 reset_torque_limit: bool = True) -> None:
+                 reset_torque_limit: bool = True,
+                 hot_plug: bool = False,
+                 absent_after_misses: int = DEFAULT_ABSENT_AFTER_MISSES,
+                 presence_period: int = DEFAULT_PRESENCE_PERIOD,
+                 probe_timeout: float = DEFAULT_PROBE_TIMEOUT,
+                 watch_ids: Sequence[int] = ()) -> None:
         super().__init__(transport, actuators)
         for actuator in self.actuators:
             if not isinstance(actuator, FeetechStsActuator):
@@ -61,6 +144,21 @@ class FeetechBus(Bus):
         self.read_timeout = float(read_timeout)
         self.use_sync_read = bool(use_sync_read)
         self.reset_torque_limit = bool(reset_torque_limit)
+        self.hot_plug = bool(hot_plug)
+        if int(absent_after_misses) < 1 or int(presence_period) < 1:
+            raise ValueError("absent_after_misses and presence_period must be >= 1")
+        self.absent_after_misses = int(absent_after_misses)
+        self.presence_period = int(presence_period)
+        self.probe_timeout = float(probe_timeout)
+        own = {int(a.id) for a in self.actuators}
+        self.watch_ids = tuple(sorted({int(i) for i in watch_ids} - own))
+        self._watched: Dict[int, bool] = {}
+        # Hot-plug bookkeeping: who is present, why the others are not, and
+        # which absent servo the next probe asks.
+        self._present: Dict[int, bool] = {}
+        self._absent_why: Dict[int, str] = {}
+        self._reads = 0
+        self._probe_turn = 0
         self._states: Dict[int, ActuatorState] = {}
         self._missed = 0
         self._consecutive_misses: Dict[int, int] = {}
@@ -78,6 +176,27 @@ class FeetechBus(Bus):
 
     def last_state(self, actuator_id: int) -> Optional[ActuatorState]:
         return self._states.get(actuator_id)
+
+    def present(self, actuator_id: int) -> bool:
+        """Whether a servo is answering.
+
+        With ``hot_plug``: it passed the start-up check and has not missed
+        ``absent_after_misses`` reads in a row since. Without it a servo is
+        never taken away, so this is whether it has ever reported.
+        """
+        if self.hot_plug:
+            return self._present.get(int(actuator_id), False)
+        return int(actuator_id) in self._states
+
+    def absence_reason(self, actuator_id: int) -> str:
+        """Why a servo is not present; empty when it is."""
+        if self.present(actuator_id):
+            return ""
+        return self._absent_why.get(int(actuator_id), "never answered")
+
+    def _mark_absent(self, actuator_id: int, why: str) -> None:
+        self._present[actuator_id] = False
+        self._absent_why[actuator_id] = why
 
     def set_joint_names(self, joint_names: Sequence[str]) -> None:
         if len(joint_names) != len(self.actuators):
@@ -114,53 +233,95 @@ class FeetechBus(Bus):
                                .format(actuator.id, got, wanted))
 
     # --- start-up ------------------------------------------------------------
-    def verify_servos(self) -> List[DiagItem]:
+    def verify_servos(self, allow_missing: bool = False) -> List[DiagItem]:
         """Read each servo's start-up facts; put it in position mode.
+
+        Parameters
+        ----------
+        allow_missing : bool
+            Report a servo that does not answer as a WARN item instead of
+            raising. Always so with ``hot_plug``, where such a servo is absent
+            until it answers.
 
         Raises
         ------
         RuntimeError
-            A configured servo does not answer.
+            A configured servo does not answer (and missing ones are not allowed).
         CapabilityError
-            A servo is not the model its config names.
+            A servo is not the model its config names (without ``hot_plug``).
         """
+        allow_missing = allow_missing or self.hot_plug
         items: List[DiagItem] = []
         for actuator in self.actuators:
             reply = self.transport.transact(actuator.encode_facts_query(),
                                             self.read_timeout)[0]
             if reply is None:
-                raise RuntimeError(
-                    "{} (id {}) did not answer on the bus".format(
-                        self._joint_name(actuator.id), actuator.id))
-            facts = actuator.decode_facts(reply)
-            notes = []
-            if facts.wire_mode != WIRE_MODE_POSITION:
-                notes.append("operating_mode {} -> position (torque off)".format(
-                    facts.wire_mode))
-                self._set_wire_mode(actuator, OperatingMode.POSITION)
-            if self.reset_torque_limit:
-                self._ack([actuator.encode_write("torque_limit",
-                                                 TORQUE_LIMIT_FULL_SCALE)],
-                          "the torque_limit reset")
-            values = {"id": str(actuator.id),
-                      "model": actuator.model.name,
-                      "homing_offset": str(facts.homing_offset)}
-            if actuator.is_hls:
-                values["goal_current"] = str(facts.protection_current)
-            if actuator.current_scale is None:
-                notes.append("current scale unknown for this model")
-            items.append(DiagItem(
-                name="servo/{}".format(self._joint_name(actuator.id)),
-                level=DiagLevel.WARN if notes else DiagLevel.OK,
-                message="; ".join(notes) or "verified",
-                values=values))
+                if not allow_missing:
+                    raise RuntimeError(
+                        "{} (id {}) did not answer on the bus".format(
+                            self._joint_name(actuator.id), actuator.id))
+                self._mark_absent(actuator.id, "did not answer at start-up")
+                items.append(DiagItem(
+                    name="servo/{}".format(self._joint_name(actuator.id)),
+                    level=DiagLevel.WARN, message="not answering",
+                    values={"id": str(actuator.id)}))
+                continue
+            try:
+                items.append(self._check_servo(actuator, reply))
+            except CapabilityError as error:
+                if not self.hot_plug:
+                    raise
+                self._mark_absent(actuator.id, str(error))
+                items.append(DiagItem(
+                    name="servo/{}".format(self._joint_name(actuator.id)),
+                    level=DiagLevel.ERROR, message=str(error),
+                    values={"id": str(actuator.id)}))
+                continue
+            self._present[actuator.id] = True
+            self._absent_why.pop(actuator.id, None)
         return items
+
+    def _check_servo(self, actuator: FeetechStsActuator,
+                     reply: Frame) -> DiagItem:
+        """Start-up check of one servo from its facts reply.
+
+        Raises
+        ------
+        CapabilityError
+            The servo is not the model its config names.
+        """
+        facts = actuator.decode_facts(reply)
+        notes = []
+        if facts.wire_mode != WIRE_MODE_POSITION:
+            notes.append("operating_mode {} -> position (torque off)".format(
+                facts.wire_mode))
+            self._set_wire_mode(actuator, OperatingMode.POSITION)
+        if self.reset_torque_limit:
+            self._ack([actuator.encode_write("torque_limit",
+                                             TORQUE_LIMIT_FULL_SCALE)],
+                      "the torque_limit reset")
+        values = {"id": str(actuator.id),
+                  "model": actuator.model.name,
+                  "homing_offset": str(facts.homing_offset)}
+        if actuator.is_hls:
+            values["goal_current"] = str(facts.protection_current)
+        if actuator.current_scale is None:
+            notes.append("current scale unknown for this model")
+        return DiagItem(
+            name="servo/{}".format(self._joint_name(actuator.id)),
+            level=DiagLevel.WARN if notes else DiagLevel.OK,
+            message="; ".join(notes) or "verified",
+            values=values)
 
     # --- mode / torque -------------------------------------------------------
     def set_mode(self, mode: OperatingMode) -> None:
+        """Switch every servo's operating mode (an absent hot-plug servo is
+        skipped: it comes back in position mode, see :meth:`_probe_absent`)."""
         for actuator in self.actuators:
             actuator.require_mode(mode)
         for actuator in self.actuators:
+            if self.hot_plug and not self.present(actuator.id):
+                continue
             self._set_wire_mode(actuator, mode)
 
     def _write_torque(self, actuators, enabled: bool) -> None:
@@ -194,7 +355,9 @@ class FeetechBus(Bus):
         held = []
         groups: Dict[Tuple[int, int], List[Tuple[int, bytes]]] = {}
         for actuator, command in zip(self.actuators, commands):
-            if command is None:
+            if command is None or (self.hot_plug
+                                   and not self.present(actuator.id)):
+                # An absent servo gets torque off only, so it comes back limp.
                 released.append(actuator)
                 continue
             if actuator.facts.wire_mode != actuator.wire_mode_of(command.mode):
@@ -217,36 +380,105 @@ class FeetechBus(Bus):
         state (``None`` until it has answered once) and counts as a miss --
         never a faked zero."""
         wait = self.read_timeout if timeout is None else float(timeout)
-        fresh = (self._sync_read(wait) if self.use_sync_read
-                 else self._individual_reads(wait))
+        polled = [a for a in self.actuators
+                  if not self.hot_plug or self.present(a.id)]
+        fresh = (self._sync_read(polled, wait) if self.use_sync_read
+                 else self._individual_reads(polled, wait))
         now = time.monotonic()
         states: List[ActuatorState] = []
+        polled_ids = {a.id for a in polled}
         for actuator in self.actuators:
             state = fresh.get(actuator.id)
-            if state is None:
+            if state is None and actuator.id in polled_ids:
                 self._missed += 1
-                self._consecutive_misses[actuator.id] = (
-                    self._consecutive_misses.get(actuator.id, 0) + 1)
-            else:
+                misses = self._consecutive_misses.get(actuator.id, 0) + 1
+                self._consecutive_misses[actuator.id] = misses
+                if self.hot_plug and misses >= self.absent_after_misses:
+                    self._mark_absent(actuator.id, "no reply to {} reads in a row"
+                                      .format(misses))
+            elif state is not None:
                 self._states[actuator.id] = state
                 self._last_rx[actuator.id] = now
                 self._consecutive_misses[actuator.id] = 0
             states.append(self._states.get(actuator.id))
+        self._reads += 1
+        if ((self.hot_plug or self.watch_ids)
+                and self._reads % self.presence_period == 0):
+            self._probe_next()
         return states
 
-    def _individual_reads(self, timeout: float) -> Dict[int, ActuatorState]:
+    def _probe_next(self) -> None:
+        """Probe the next absent servo or watched id, in turn (one per call)."""
+        absent = ([a for a in self.actuators if not self.present(a.id)]
+                  if self.hot_plug else [])
+        turn = absent + list(self.watch_ids)
+        if not turn:
+            return
+        item = turn[self._probe_turn % len(turn)]
+        self._probe_turn += 1
+        if isinstance(item, int):
+            self._probe_watched(item)
+        else:
+            self._probe_absent(item)
+
+    def _probe_watched(self, servo_id: int) -> None:
+        """PING a watched id and record whether it answered."""
+        reply = self.transport.transact(
+            [Frame(payload=fp.build_ping(servo_id), address=servo_id)],
+            self.probe_timeout)[0]
+        self._watched[servo_id] = reply is not None
+
+    def watched(self, servo_id: int) -> bool:
+        """Whether a watched id answered its last PING (False before the first)."""
+        return self._watched.get(int(servo_id), False)
+
+    def answering_ids(self) -> List[int]:
+        """Every id known to answer now: present servos and watched ids."""
+        ids = {a.id for a in self.actuators if self.present(a.id)}
+        ids.update(i for i, seen in self._watched.items() if seen)
+        return sorted(ids)
+
+    def _probe_absent(self, actuator: FeetechStsActuator) -> None:
+        """Ask one absent servo whether it is back; check it if so.
+
+        A servo that answers is checked like at start-up before it counts as
+        present; one of another model stays absent with the reason recorded.
+        """
+        reply = self.transport.transact(actuator.encode_facts_query(),
+                                        self.probe_timeout)[0]
+        if reply is None:
+            return
+        try:
+            self._check_servo(actuator, reply)
+        except CapabilityError as error:
+            self._mark_absent(actuator.id, str(error))
+            return
+        except RuntimeError as error:
+            # It answered the probe but not the settings writes after it:
+            # not back yet (a connector still being pushed in).
+            self._mark_absent(actuator.id, "answered, then {}".format(error))
+            return
+        self._present[actuator.id] = True
+        self._absent_why.pop(actuator.id, None)
+        self._consecutive_misses[actuator.id] = 0
+
+    def _individual_reads(self, actuators, timeout: float) -> Dict[int, ActuatorState]:
         queries: List[Frame] = []
-        for actuator in self.actuators:
+        for actuator in actuators:
             queries.extend(actuator.encode_query())
+        if not queries:
+            return {}
         replies = self.transport.transact(queries, timeout)
         fresh: Dict[int, ActuatorState] = {}
-        for actuator, reply in zip(self.actuators, replies):
+        for actuator, reply in zip(actuators, replies):
             if reply is not None and actuator.matches(reply):
                 fresh[actuator.id] = actuator.decode_state(reply)
         return fresh
 
-    def _sync_read(self, timeout: float) -> Dict[int, ActuatorState]:
-        by_id = {a.id: a for a in self.actuators}
+    def _sync_read(self, actuators, timeout: float) -> Dict[int, ActuatorState]:
+        by_id = {a.id: a for a in actuators}
+        if not by_id:
+            return {}
         reset = getattr(self.transport, "reset_input", None)
         if reset is not None:
             reset()
@@ -293,6 +525,10 @@ class FeetechBus(Bus):
         be within 2 counts of ``position``, else this raises rather than
         report a calibration that did not happen.
 
+        An HLS ignores a negative homing offset (see :func:`hls_homing_offset`):
+        a pose that needs one is declared up to ``HLS_ORIGIN_SLACK`` counts away
+        from ``position``, and ``reported`` says where.
+
         Parameters
         ----------
         index : int
@@ -335,6 +571,15 @@ class FeetechBus(Bus):
         present = read("present_position")
         raw = (present + old) % RESOLUTION
         new = raw - target
+        if actuator.is_hls and new < 0:
+            new, landed = hls_homing_offset(raw, target, MAX_HOMING_OFFSET, RESOLUTION)
+            if abs(landed - target) > HLS_ORIGIN_SLACK:
+                raise ValueError(
+                    "id {}: an HLS takes no negative homing offset, and the nearest "
+                    "it can do reads count {} instead of {}; turn the horn so the "
+                    "pose is on the other side of the middle".format(
+                        actuator.id, landed, target))
+            target = landed
         if abs(new) > MAX_HOMING_OFFSET:
             raise ValueError(
                 "id {}: declaring this pose {:+.4f} rad needs a homing offset of "
@@ -386,7 +631,11 @@ class FeetechBus(Bus):
                       "consecutive_misses": str(streak),
                       "last_reply_age_s": ("never" if age is None
                                            else "{:.3f}".format(age))}
-            if state is None:
+            if self.hot_plug and not self.present(actuator.id):
+                level = DiagLevel.WARN
+                message = "Not present: {}.".format(
+                    self.absence_reason(actuator.id))
+            elif state is None:
                 level, message = DiagLevel.STALE, "No status received yet."
             elif streak > 0:
                 level = DiagLevel.WARN

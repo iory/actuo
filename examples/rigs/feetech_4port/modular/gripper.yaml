@@ -1,0 +1,15 @@
+bus:
+  transport: {plugin: serial, channel: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B91044152-if00, bitrate: 1000000}
+  hot_plug: true
+urdf: gripper.urdf
+modules:
+  arm: {joints: [arm_shoulder, arm_elbow]}
+  hand: {gripper: [gripper_finger]}
+# HLS3950M ids 3 and 4 rest in the middle of their turn: their homing_offset
+# is in their EEPROM (2039 and 2047, FeetechBus.set_origin / feetech write,
+# 2026-11-24), so offset_deg is 0. Left at the factory 0 they rested at the
+# end of the turn (raw 4087 and 2), where a goal one way is outside 0..4095.
+joints:
+  - {name: arm_shoulder, actuator: {plugin: feetech_sts, id: 1, model: STS3215}}
+  - {name: arm_elbow, actuator: {plugin: feetech_sts, id: 2, model: STS3215}}
+  - {name: gripper_finger, actuator: {plugin: feetech_sts, id: 3, model: HLS3950M, offset_deg: 0.0}}

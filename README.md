@@ -58,7 +58,7 @@ commands are fenced and rate-limited). `examples/ri_with_emulator.py` runs a
 real robot config and URDF (an RCB-4mini humanoid) against the RCB-4mini
 emulator.
 
-On a bus whose servos may be missing (`hot_plug: true` on the RCB-4mini bus),
+On a bus whose servos may be missing (`hot_plug: true` on the RCB-4mini or FEETECH bus),
 the config can list more joints than are plugged in:
 
 ```python
@@ -71,6 +71,68 @@ starts from where it is, and it is limp until `servo_on`. A vector goal moves
 the attached joints; naming a detached joint is an error. A servo that stops
 answering is switched off, its motion is dropped and its measurement becomes
 NaN, so when it is plugged back in it comes back limp, from where it then is.
+
+### One robot, several robots: `actuo.modular`
+
+A modular robot can be several robots: other joints, other names, other
+calibration, another model, even when some servos are the same. Each is a
+**configuration** (an ordinary robot config and its URDF), listed in a catalog,
+and `ModularRobot` runs whichever is current:
+
+```python
+from actuo.modular import ModularRobot
+
+mr = ModularRobot("catalog.yaml", on_change=lambda s: print(s.configuration))
+mr.ri.servo_on()             # the current configuration's ActuoRobotInterface
+mr.robot                     # ... and its skrobot model
+mr.declare("drill")          # same servos, another robot: say which
+mr.resume_detection()        # or let the servos that answer decide again
+```
+
+- **detect**: the configuration all of whose ids answer becomes current (the
+  largest when several are complete; two complete of one size is a conflict,
+  reported, and the robot stays as it is).
+- **declare**: whoever drives the robot names it, for configurations with the
+  same servos.
+- A switch keeps the arm up: servos that held torque and are in the next
+  configuration keep it under their new joint names (`hold_joints`), at their
+  measured pose; the others are released first. Every model is loaded at
+  start. On `examples/rigs/feetech_4port/modular` (ids 1 and 2 shared under
+  other names and calibration) a switch took 18-39 ms, detection noticed the
+  servos change within about 1.3 s, and held servos did not move by one count.
+
+FEETECH buses only for now: detection needs the bus to see ids outside the
+current configuration (`watch_ids`).
+
+### Testing it on hardware: fault injectors and rigs
+
+`actuo.testing` makes servos come and go on purpose, so a robot that is
+plugged together at run time (`robot_modes`: `fixed`, `tool_change`,
+`reconfigurable`) can be tested without anyone pulling cables:
+
+- `actuo.testing.fault_injectors`: one interface (`unplug`, `plug`,
+  `drop_replies`, `restore`) over the hardware in the servo line --
+  [iory/servo-fault-injector](https://github.com/iory/servo-fault-injector)
+  (four ports, each with its own power and signal switch; any FEETECH /
+  DYNAMIXEL TTL / KRS speed) and
+  [iory/ics-fault-relay](https://github.com/iory/ics-fault-relay)
+  (Kondo ICS at 115200 bit/s, one servo at a time).
+- `actuo.testing.rig`: a rig file names the robot config, its URDF, the
+  `robot_modes` descriptions to check and which port each joint is on, so
+  tests speak in joints (`rig.only(["j1", "j3"])`).
+
+```sh
+ACTUO_RIG=examples/rigs/feetech_4port/rig.yaml python -m pytest tests/hardware -v
+```
+
+The hardware tests (skipped unless `ACTUO_RIG` is set) run the robot interface
+on the rig's bus with torque off and check, for **every combination** of
+plugged joints, that `attached_joints()` becomes that combination and that
+each `robot_modes` description selects from the live bus the same robot, with
+the same problems, as from the combination itself; and that a joint whose
+replies are cut while its commands still arrive is detached and comes back.
+On 2026-11-24 they passed on `examples/rigs/feetech_4port` (two STS3215, two
+HLS3950M, 1 Mbit/s): 16 combinations x 2 descriptions in about 20 s.
 
 ## With ROS 2: the servicer and shared memory
 
@@ -106,6 +168,47 @@ the PyPI package contains only `actuo/`).
 editable, so the ROS layer always runs the actuo next to it. Another package
 whose venv needs the same actuo calls `actuo_requirement()` after
 `find_package(actuo_ros)` (see `ros/actuo_ros/cmake/actuo_ros-extras.cmake.in`).
+
+#### A modular robot under ROS 2: `modular.launch.py`
+
+```sh
+ros2 launch actuo_ros modular.launch.py catalog:=<catalog>.yaml
+ros2 service call /actuo_configuration/declare actuo_msgs/srv/DeclareConfiguration "{name: drill}"
+```
+
+One controller_manager holds every configuration of an `actuo.modular` catalog
+side by side (`actuo-modular-files`: each configuration's modules as
+components `<configuration>_<module>`, each on the servicer segment
+`<shm-name>_<configuration>`; joint names must differ between
+configurations). The servicer (`actuo_bus_node --real --catalog`) runs the
+current configuration and switches in-process -- its loop is left without
+releasing the servos the next configuration has, and those keep torque under
+their new names -- and publishes `/actuo_configuration/configuration`.
+`actuo_configuration_manager` follows it: the other configurations'
+controllers and components go inactive, `/robot_description` becomes the new
+configuration's model (RViz follows), and each module of the running
+configuration comes up -- component, then its joint_state_broadcaster and
+controllers -- as soon as all its servos answer, so a module plugged in later
+joins and one pulled out goes down alone. controller_manager takes the
+superset description on its own topic (`/actuo_modular/robot_description`).
+
+On `examples/rigs/feetech_4port/modular` (2026-11-24,
+`ros/actuo_ros/test/hardware/check_modular_launch.py`): after the servos
+changed, the servicer switched in 47 ms, ros2_control followed 80 ms later and
+the new modules were up 70 ms after that; a declaration had the modules up
+0.26 s after the service call; a module pulled within a configuration went
+down alone and was back 0.9 s after it was plugged in.
+
+With `moveit:=true`, `actuo_moveit_follower` runs MoveIt for the configuration
+that runs. move_group reads a robot model once, so on every switch it is
+restarted with the new configuration's model, SRDF (a planning group per
+module, adjacent links not checked; `actuo-modular-files --moveit`), KDL,
+joint limits (the URDF's velocities, and an acceleration limit MoveIt's time
+parameterization needs) and its trajectory controllers, which MoveIt does not
+switch itself. `/actuo_moveit_follower/ready` names the configuration once it
+plans. On the same rig, planning succeeded for each configuration's groups
+under its own joint names after each switch, and failed for a group of the
+other configuration; move_group took 3.0-4.3 s to answer again after a switch.
 
 `firmware/actuo_uart_relay/` is the Arduino UNO R4 WiFi sketch that relays an
 RCB-4mini's serial port over UDP for the `kondo_rcb4_udp` transport.

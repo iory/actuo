@@ -1,0 +1,14 @@
+# Four FEETECH servos, each on its own port of a servo-fault-injector board
+# (iory/servo-fault-injector), driven from a Waveshare Bus Servo Adapter (A).
+# Run the hardware tests against it with:
+#   ACTUO_RIG=examples/rigs/feetech_4port/rig.yaml python -m pytest tests/hardware -v
+robot: robot.yaml
+urdf: robot.urdf
+modes: [tool_change.yaml, reconfigurable.yaml]
+modular: modular/catalog.yaml   # actuo.modular configurations (tests/hardware/test_modular_hw.py)
+injector:
+  plugin: servo_fault_injector
+  # port: /dev/serial/by-id/usb-Raspberry_Pi_Pico_2_...   (found by VID when only one)
+  unplug_by: power        # PORT 4's signal switch does not open on the first v0.1 board
+targets: {j1: 1, j2: 2, j3: 3, j4: 4}
+drop_joints: [j1, j2, j3] # not j4: same broken switch

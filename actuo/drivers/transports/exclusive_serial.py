@@ -29,6 +29,7 @@ except ImportError:  # Windows: no flock / TIOCEXCL; a COM port is exclusive
 
 #: ``TIOCEXCL`` where the platform has it (Linux, macOS); ``None`` elsewhere.
 _TIOCEXCL = getattr(termios, "TIOCEXCL", None)
+_TIOCNXCL = getattr(termios, "TIOCNXCL", None)
 
 
 def open_exclusive(channel: str, bitrate: int, **kwargs) -> serial.Serial:
@@ -70,3 +71,19 @@ def open_exclusive(channel: str, bitrate: int, **kwargs) -> serial.Serial:
             # still holds.
             pass
     return port
+
+
+def close_exclusive(port: serial.Serial) -> None:
+    """Give up exclusive use, then close.
+
+    ``TIOCEXCL`` outlives this process's close while anything else still holds
+    the tty (the master of an emulator's pty does), so the next open -- the
+    next configuration of :mod:`actuo.modular`, in this same process -- would
+    get EBUSY. Clearing it first leaves the port as it was found.
+    """
+    if _TIOCNXCL is not None and port.is_open:
+        try:
+            fcntl.ioctl(port.fileno(), _TIOCNXCL)
+        except OSError:
+            pass
+    port.close()

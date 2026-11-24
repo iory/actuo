@@ -214,3 +214,62 @@ def test_a_servo_pulled_out_is_switched_off_and_comes_back_limp(tmp_path):
         assert board.enabled[4] is False
     finally:
         ri.close()
+
+
+
+def second_link(tmp_path, board, name="rcb4_second"):
+    """The same emulated board served on a fresh pty: the next interface opens
+    that one (a pty reopened at a non-standard rate fails tcsetattr)."""
+    link = str(tmp_path / name)
+    threading.Thread(target=serve, args=(board, link, lambda m: None),
+                     daemon=True).start()
+    deadline = time.monotonic() + 5
+    while not os.path.exists(link):
+        assert time.monotonic() < deadline, "emulator did not start"
+        time.sleep(0.01)
+    return {"channel": link}
+
+
+def reopen(tmp_path, board, **kwargs):
+    return ActuoRobotInterface(RobotModel.from_urdf(str(tmp_path / "two.urdf")),
+                               str(tmp_path / "config.yaml"),
+                               transport_overrides=second_link(tmp_path, board),
+                               **kwargs)
+
+
+def test_hold_joints_keeps_the_torque_another_interface_left_on(tmp_path):
+    """A second interface takes over a held joint without releasing it (how
+    actuo.modular switches configurations)."""
+    first, board = start(tmp_path)
+    first.servo_on(["j0"])
+    settle(first, 0.2)
+    assert board.enabled[2] and not board.enabled[4]
+    first.close()                                    # leaves torque as it is
+    assert board.enabled[2]
+    second = reopen(tmp_path, board, hold_joints=["j0"])
+    try:
+        settle(second, 0.3)
+        assert second.supervisor.enabled_joints == ["j0"]
+        assert board.enabled[2]                      # never released in between
+    finally:
+        second.close()
+
+
+def test_without_hold_joints_a_new_interface_releases_every_joint(tmp_path):
+    first, board = start(tmp_path)
+    first.servo_on(["j0"])
+    settle(first, 0.2)
+    first.close()
+    second = reopen(tmp_path, board)
+    try:
+        settle(second, 0.3)
+        assert not board.enabled[2]
+    finally:
+        second.close()
+
+
+def test_an_unknown_hold_joint_is_refused(tmp_path):
+    first, board = start(tmp_path)
+    first.close()
+    with pytest.raises(KeyError, match="hold_joints"):
+        reopen(tmp_path, board, hold_joints=["nope"])

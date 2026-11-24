@@ -1,0 +1,19 @@
+# The arm (j1) is the base; a tool slot takes tool_a (j2) or tool_b (j3); an
+# accessory slot takes the wrist (j4).
+mode: reconfigurable
+base:
+  urdf: base.urdf
+  modules:
+    arm: {joints: [j1], controllers: [jtc_arm]}
+slots:
+  tool:
+    parent_link: j1_link
+    xyz: [0, 0, 0.05]
+    candidates:
+      tool_a: {urdf: tool_a.urdf, joints: [j2], controllers: [jtc_tool_a]}
+      tool_b: {urdf: tool_b.urdf, joints: [j3], controllers: [jtc_tool_b]}
+  accessory:
+    parent_link: j1_link
+    xyz: [0, 0.05, 0]
+    candidates:
+      wrist: {urdf: wrist.urdf, joints: [j4], controllers: [jtc_wrist]}

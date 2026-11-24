@@ -1,0 +1,15 @@
+bus:
+  transport: {plugin: serial, channel: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B91044152-if00, bitrate: 1000000}
+  hot_plug: true
+urdf: drill.urdf
+modules:
+  arm: {joints: [shoulder_pitch, elbow_pitch]}
+  tool: {joints: [drill_spin]}
+# HLS3950M ids 3 and 4 rest in the middle of their turn: their homing_offset
+# is in their EEPROM (2039 and 2047, FeetechBus.set_origin / feetech write,
+# 2026-11-24), so offset_deg is 0. Left at the factory 0 they rested at the
+# end of the turn (raw 4087 and 2), where a goal one way is outside 0..4095.
+joints:
+  - {name: shoulder_pitch, actuator: {plugin: feetech_sts, id: 1, model: STS3215}}
+  - {name: elbow_pitch, actuator: {plugin: feetech_sts, id: 2, model: STS3215, direction: -1, offset_deg: 10.0}}
+  - {name: drill_spin, actuator: {plugin: feetech_sts, id: 4, model: HLS3950M, offset_deg: 0.0}}
