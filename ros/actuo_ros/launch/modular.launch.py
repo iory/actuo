@@ -19,6 +19,11 @@ Switch by plugging another configuration's servos in, or declare one::
 
 Every joint comes up limp, as with ``robot.launch.py``; servos that held torque
 keep it across a switch.
+
+With ``moveit:=true``, ``actuo_moveit_follower`` keeps a move_group running for
+the configuration that runs, restarting it with that configuration's model and
+SRDF (a planning group per module) on every switch; ``/actuo_moveit_follower/ready``
+says when it plans. Needs MoveIt 2 (moveit_ros_move_group, moveit_configs_utils).
 """
 
 import os
@@ -52,9 +57,11 @@ def _setup(context):
                 or os.path.splitext(os.path.basename(catalog))[0])
     prefix = FindPackagePrefix("actuo_ros").perform(context)
     out_dir = tempfile.mkdtemp(prefix="actuo_{}_".format(shm_name))
+    moveit = LaunchConfiguration("moveit").perform(context).lower() == "true"
     result = subprocess.run(
         [os.path.join(prefix, "lib", "actuo_ros", "actuo-modular-files"), catalog,
-         "--out", out_dir, "--shm-name", shm_name, "--hardware-plugin", HARDWARE_PLUGIN],
+         "--out", out_dir, "--shm-name", shm_name, "--hardware-plugin", HARDWARE_PLUGIN]
+        + (["--moveit"] if moveit else []),
         capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError("actuo-modular-files failed on {}:\n{}".format(
@@ -89,6 +96,9 @@ def _setup(context):
              output="screen", parameters=[{"manifest": manifest_path,
                                            "superset_topic": SUPERSET_TOPIC}]),
     ]
+    if moveit:
+        control.append(Node(package="actuo_ros", executable="actuo_moveit_follower",
+                            output="screen", parameters=[{"manifest": manifest_path}]))
     # Loaded and configured, all of them, by one spawner (spawners take turns
     # on one lock): the configuration manager activates a module's
     # controllers when the module comes up.
@@ -121,6 +131,8 @@ def generate_launch_description():
         DeclareLaunchArgument("port", default_value="",
                               description="serial device, overriding the configs' "
                                           "bus.transport.channel"),
+        DeclareLaunchArgument("moveit", default_value="false", choices=["true", "false"],
+                              description="run move_group for the running configuration"),
         DeclareLaunchArgument("rviz_config", default_value="",
                               description="start RViz with this config"),
         OpaqueFunction(function=_setup),

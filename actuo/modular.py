@@ -470,7 +470,7 @@ class Switching:
 
 
 __all__ = ("Catalog", "Configuration", "ModularRobot", "ModularState", "component_name",
-           "ros2_control_files", "shm_segment",
+           "moveit_files", "ros2_control_files", "shm_segment", "srdf",
            "SwitchRequest", "Switching")
 
 
@@ -624,6 +624,126 @@ def ros2_control_files(catalog_path: str, out_dir: str, shm_base: str,
         f.write(ET.tostring(superset, encoding="unicode"))
     manifest = {"urdf": urdf, "controllers_yaml": controllers_yaml, "initial": initial,
                 "configurations": manifest_configs}
+    with open(os.path.join(out_dir, "manifest.yaml"), "w") as f:
+        yaml.safe_dump(manifest, f, sort_keys=False)
+    return manifest
+
+
+# -- MoveIt files ---------------------------------------------------------------
+
+#: The IK plugin each planning group gets.
+KINEMATICS_SOLVER = "kdl_kinematics_plugin/KDLKinematicsPlugin"
+#: rad/s^2 a joint is planned to accelerate at when nothing says otherwise. URDF
+#: has no acceleration limit, and MoveIt's time parameterization needs one.
+DEFAULT_MAX_ACCELERATION = 5.0
+
+
+def joint_limits(model_xml: str, max_acceleration: float) -> Dict[str, Dict[str, object]]:
+    """MoveIt's ``joint_limits`` for the URDF's movable joints: its velocity
+    limit, and ``max_acceleration``."""
+    import xml.etree.ElementTree as ET
+
+    out = {}
+    for joint in ET.fromstring(model_xml).findall("joint"):
+        if joint.get("type") in ("fixed", "floating", "planar"):
+            continue
+        limit = joint.find("limit")
+        velocity = None if limit is None else limit.get("velocity")
+        out[joint.get("name")] = {
+            "has_velocity_limits": velocity is not None,
+            "max_velocity": float(velocity) if velocity is not None else 0.0,
+            "has_acceleration_limits": True,
+            "max_acceleration": float(max_acceleration)}
+    return out
+
+
+def srdf(model_xml: str, modules: Dict[str, List[str]]) -> str:
+    """A semantic description: one planning group per module, adjacent links
+    never checked against each other.
+
+    Parameters
+    ----------
+    model_xml : str
+        The configuration's URDF.
+    modules : dict
+        Module name -> its joints, in order.
+    """
+    import xml.etree.ElementTree as ET
+
+    model = ET.fromstring(model_xml)
+    root = ET.Element("robot", name=model.get("name", "robot"))
+    for module, joints in modules.items():
+        group = ET.SubElement(root, "group", name=module)
+        for joint in joints:
+            ET.SubElement(group, "joint", name=joint)
+    for joint in model.findall("joint"):
+        ET.SubElement(root, "disable_collisions", link1=joint.find("parent").get("link"),
+                      link2=joint.find("child").get("link"), reason="Adjacent")
+    return ET.tostring(root, encoding="unicode")
+
+
+def moveit_files(catalog_path: str, out_dir: str, manifest: Dict[str, object],
+                 max_acceleration: float = DEFAULT_MAX_ACCELERATION) -> Dict[str, object]:
+    """Write each configuration's move_group parameters; add them to ``manifest``.
+
+    MoveIt reads a robot model once, at start, so a modular robot gets one
+    move_group parameter file per configuration, and the running move_group
+    is replaced when the configuration changes. Each file holds the
+    configuration's model and :func:`srdf`, a KDL solver per group, and its
+    controllers for ``moveit_simple_controller_manager`` -- which MoveIt does
+    not switch (``moveit_manage_controllers: false``): the configuration
+    manager does. Planning pipelines are left to whoever starts move_group
+    (they live in MoveIt's own share directory). Joint limits are the URDF's
+    velocity limits and ``max_acceleration`` [rad/s^2] for every joint: MoveIt's
+    time parameterization fails a plan without an acceleration limit.
+
+    Returns
+    -------
+    dict
+        ``manifest``, with ``configurations[name]["moveit"]`` (the parameter
+        file) and ``["groups"]`` added, and rewritten in ``out_dir``.
+    """
+    from actuo.drivers.config import load_document
+    from actuo.drivers.robot_document import controllers_of, module_joints
+
+    catalog = Catalog(catalog_path)
+    for name, config in catalog.configurations.items():
+        spec = manifest["configurations"][name]
+        document = load_document(config.robot)
+        with open(spec["urdf"]) as f:
+            model = f.read()
+        groups = {m: s["joints"] + s["gripper"] for m, s in module_joints(document).items()}
+        semantic = srdf(model, groups)
+        with open(os.path.join(out_dir, name + ".srdf"), "w") as f:
+            f.write(semantic)
+        controllers = {"{}_{}".format(name, c): s for c, s in controllers_of(document).items()}
+        params = {
+            "robot_description": model,
+            "robot_description_semantic": semantic,
+            "robot_description_planning": {
+                "joint_limits": joint_limits(model, max_acceleration)},
+            "robot_description_kinematics": {
+                g: {"kinematics_solver": KINEMATICS_SOLVER,
+                    "kinematics_solver_search_resolution": 0.005,
+                    "kinematics_solver_timeout": 0.05} for g in groups},
+            "moveit_manage_controllers": False,
+            "moveit_controller_manager":
+                "moveit_simple_controller_manager/MoveItSimpleControllerManager",
+            "moveit_simple_controller_manager": {
+                "controller_names": list(controllers),
+                **{c: {"type": "FollowJointTrajectory", "action_ns": "follow_joint_trajectory",
+                       "default": True, "joints": s["joints"]}
+                   for c, s in controllers.items()}},
+            "trajectory_execution": {"allowed_execution_duration_scaling": 1.2,
+                                     "allowed_goal_duration_margin": 0.5,
+                                     "allowed_start_tolerance": 0.05},
+            "publish_robot_description_semantic": True,
+        }
+        path = os.path.join(out_dir, name + "_move_group.yaml")
+        with open(path, "w") as f:
+            yaml.safe_dump({"move_group": {"ros__parameters": params}}, f, sort_keys=False)
+        spec["moveit"] = path
+        spec["groups"] = groups
     with open(os.path.join(out_dir, "manifest.yaml"), "w") as f:
         yaml.safe_dump(manifest, f, sort_keys=False)
     return manifest

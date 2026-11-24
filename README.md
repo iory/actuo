@@ -199,6 +199,17 @@ the new modules were up 70 ms after that; a declaration had the modules up
 0.26 s after the service call; a module pulled within a configuration went
 down alone and was back 0.9 s after it was plugged in.
 
+With `moveit:=true`, `actuo_moveit_follower` runs MoveIt for the configuration
+that runs. move_group reads a robot model once, so on every switch it is
+restarted with the new configuration's model, SRDF (a planning group per
+module, adjacent links not checked; `actuo-modular-files --moveit`), KDL,
+joint limits (the URDF's velocities, and an acceleration limit MoveIt's time
+parameterization needs) and its trajectory controllers, which MoveIt does not
+switch itself. `/actuo_moveit_follower/ready` names the configuration once it
+plans. On the same rig, planning succeeded for each configuration's groups
+under its own joint names after each switch, and failed for a group of the
+other configuration; move_group took 3.0-4.3 s to answer again after a switch.
+
 `firmware/actuo_uart_relay/` is the Arduino UNO R4 WiFi sketch that relays an
 RCB-4mini's serial port over UDP for the `kondo_rcb4_udp` transport.
 

@@ -4,7 +4,9 @@ The catalog (:mod:`actuo.modular`) lists configurations; each robot config
 names its ``urdf`` and ``modules``. This writes, into ``--out``, the superset
 ``robot.urdf`` (every configuration's components, each on its own segment
 ``<shm-name>_<configuration>``), ``controllers.yaml``, each configuration's own
-model, and ``manifest.yaml`` -- and prints the manifest's path. See
+model, and ``manifest.yaml`` -- and prints the manifest's path. With
+``--moveit``, also each configuration's SRDF and move_group parameters
+(:func:`actuo.modular.moveit_files`). See
 :func:`actuo.modular.ros2_control_files`.
 
 Examples
@@ -19,7 +21,7 @@ import argparse
 import os
 import sys
 
-from actuo.modular import ros2_control_files
+from actuo.modular import moveit_files, ros2_control_files
 
 
 def main(argv=None) -> int:
@@ -30,9 +32,14 @@ def main(argv=None) -> int:
                         help="segment base name; each configuration adds _<name>")
     parser.add_argument("--hardware-plugin", required=True,
                         help="the shared-memory component's ros2_control plugin name")
+    parser.add_argument("--moveit", action="store_true",
+                        help="also each configuration's SRDF and move_group parameters")
     args = parser.parse_args(argv)
     try:
-        ros2_control_files(args.catalog, args.out, args.shm_name, args.hardware_plugin)
+        manifest = ros2_control_files(args.catalog, args.out, args.shm_name,
+                                      args.hardware_plugin)
+        if args.moveit:
+            moveit_files(args.catalog, args.out, manifest)
     except (OSError, ValueError, KeyError) as error:
         print("actuo-modular-files: {}".format(error), file=sys.stderr)
         return 1

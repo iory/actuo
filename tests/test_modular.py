@@ -203,3 +203,31 @@ def test_one_joint_name_in_two_configurations_is_refused(tmp_path):
         "configurations:\n  a: {robot: a.yaml, urdf: a.urdf}\n  b: {robot: b.yaml, urdf: b.urdf}\n")
     with pytest.raises(ValueError, match="name it differently"):
         ros2_control_files(str(tmp_path / "catalog.yaml"), str(tmp_path / "out"), "m", "p/P")
+
+
+def test_each_configuration_gets_a_semantic_description_and_move_group_parameters(tmp_path):
+    import xml.etree.ElementTree as ET
+
+    import yaml as y
+
+    from actuo.modular import moveit_files, ros2_control_files
+
+    modular_robot(tmp_path, "gripper", ["g1", "g2"])
+    modular_robot(tmp_path, "drill", ["d1"])
+    (tmp_path / "catalog.yaml").write_text(
+        "configurations:\n  gripper: {robot: gripper.yaml, urdf: gripper.urdf}\n"
+        "  drill: {robot: drill.yaml, urdf: drill.urdf}\n")
+    out = str(tmp_path / "out")
+    m = moveit_files(str(tmp_path / "catalog.yaml"), out,
+                     ros2_control_files(str(tmp_path / "catalog.yaml"), out, "mod", "p/P"))
+    spec = m["configurations"]["gripper"]
+    assert spec["groups"] == {"arm": ["g1", "g2"]}
+    params = y.safe_load(open(spec["moveit"]))["move_group"]["ros__parameters"]
+    semantic = ET.fromstring(params["robot_description_semantic"])
+    assert [j.get("name") for j in semantic.find("group").findall("joint")] == ["g1", "g2"]
+    assert len(semantic.findall("disable_collisions")) == 2          # base-g1, g1-g2
+    assert params["moveit_manage_controllers"] is False              # the manager switches them
+    assert params["moveit_simple_controller_manager"]["controller_names"] == ["gripper_arm_controller"]
+    assert "drill" not in params["robot_description"]
+    limits = params["robot_description_planning"]["joint_limits"]
+    assert limits["g1"]["max_velocity"] == 1.0 and limits["g1"]["has_acceleration_limits"]
