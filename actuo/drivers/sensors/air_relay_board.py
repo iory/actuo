@@ -1,11 +1,13 @@
-"""KJS-03 / AIRRELAY sensor board -- a DYNAMIXEL device that is not a motor.
+"""Air relay board -- a DYNAMIXEL device that is not a motor.
 
 This board sits on the same bus as the servos and impersonates a DYNAMIXEL
 device, but it has no shaft: it carries an IMU, four proximity sensors, five
-ADC channels, a magnetic encoder, and on the AIRRELAY variant two solenoid
-valves driving a vacuum gripper. It is exactly the case the device/plugin design
-exists for -- custom hardware joining the stack as a plugin, with zero core
-edits, publishing named channels rather than being forced into a fixed struct.
+ADC channels, a magnetic encoder, and two solenoid valves driving a vacuum
+gripper. The same firmware (iory/KJS-03) also runs on the sensor-only KJS-03
+board, which has no valves; this plugin reads both. It is exactly the case
+the device/plugin design exists for -- custom hardware joining the stack as a
+plugin, with zero core edits, publishing named channels rather than being
+forced into a fixed struct.
 
 Why this is a ``Sensor`` and not an ``Actuator``
 -----------------------------------------------
@@ -45,13 +47,13 @@ from actuo.core.registry import register_sensor
 from actuo.drivers import dynamixel_protocol as dxl
 
 #: Model number the board reports at control-table address 0.
-KJS03_MODEL_NUMBER = 0x0A03
+AIR_RELAY_BOARD_MODEL_NUMBER = 0x0A03
 
 #: Model Information (addresses 2..5) carries this magic. Model numbers are
 #: ROBOTIS's to assign and this board is not a ROBOTIS product, so matching on
 #: the number alone would load a completely wrong control table the day it
 #: collides with a real one. Both must agree.
-KJS03_MODEL_INFO_MAGIC = 0x3053414B
+AIR_RELAY_BOARD_MODEL_INFO_MAGIC = 0x3053414B
 
 # --- control table (firmware v2) --------------------------------------------
 REG_MODEL_NUMBER = 0
@@ -86,7 +88,7 @@ REG_SAMPLE_COUNTER = 106
 SENSOR_BLOCK_ADDR = REG_GYRO_X
 SENSOR_BLOCK_LEN = REG_SAMPLE_COUNTER + 2 - REG_GYRO_X  # 44
 
-BOARD_REV_AIRRELAY = 3
+BOARD_REV_AIR_RELAY = 3
 
 #: Valve states the firmware defines. Named rather than numeric at the call
 #: site: `1` does not say "this is the one that grips".
@@ -159,21 +161,22 @@ HW_ERR_BITS = {
     0x20: "pressure_zero",
 }
 
-#: Error bits that mean something is actually WRONG on an AIRRELAY board.
+#: Error bits that mean something is actually WRONG on an air relay board.
 #:
-#: The firmware raises `proximity` and `magnetic_encoder` on every AIRRELAY,
-#: because it probes for parts this variant is not fitted with. Measured
-#: 2026-07-24: a healthy board reports 0x06 continuously. Reporting that
-#: as a fault trains an operator to ignore the fault line, which is worse than
-#: not having one -- so the bits are still published as channels (nothing is
-#: hidden), and only these are escalated.
-AIRRELAY_REAL_ERROR_BITS = 0x01 | 0x08 | 0x10 | 0x20  # imu, adc, rx_overrun, pressure_zero
+#: Firmware before KJS-03 3929a24 raises `proximity` and `magnetic_encoder` on
+#: every air relay board, because it probes for parts the board is not fitted
+#: with. Measured 2026-07-24: a healthy board reports 0x06 continuously.
+#: Reporting that as a fault trains an operator to ignore the fault line,
+#: which is worse than not having one -- so the bits are still published as
+#: channels (nothing is hidden), and only these are escalated.
+# imu, adc, rx_overrun, pressure_zero
+AIR_RELAY_REAL_ERROR_BITS = 0x01 | 0x08 | 0x10 | 0x20
 
 _G = 9.80665
 
 
 @dataclass(frozen=True)
-class Kjs03Ranges:
+class AirRelayBoardRanges:
     """IMU full scale, read from the board rather than assumed.
 
     The board ships with one of three ICM parts and they do not share a range.
@@ -185,15 +188,15 @@ class Kjs03Ranges:
     accel_g: float
 
 
-@register_sensor("kjs03")
-class Kjs03Sensor(Sensor):
-    """One KJS-03 (or AIRRELAY) board on a DYNAMIXEL bus.
+@register_sensor("air_relay_board")
+class AirRelayBoardSensor(Sensor):
+    """One air relay board (or sensor-only KJS-03) on a DYNAMIXEL bus.
 
     Parameters
     ----------
     device_id : int
         DYNAMIXEL bus id.
-    ranges : Kjs03Ranges, optional
+    ranges : AirRelayBoardRanges, optional
         IMU full scale. Left ``None`` until :meth:`decode_identity` has read it
         off the board, and until then the IMU channels are reported in raw
         counts only -- never scaled with a guessed range.
@@ -205,7 +208,7 @@ class Kjs03Sensor(Sensor):
     """
 
     def __init__(self, device_id: int,
-                 ranges: Optional[Kjs03Ranges] = None,
+                 ranges: Optional[AirRelayBoardRanges] = None,
                  board_rev: Optional[int] = None,
                  protocol: int = dxl.PROTOCOL_2) -> None:
         super().__init__(device_id, calibration=None)
@@ -221,7 +224,7 @@ class Kjs03Sensor(Sensor):
     # --- identity ------------------------------------------------------------
     @property
     def has_valves(self) -> bool:
-        return self.board_rev == BOARD_REV_AIRRELAY
+        return self.board_rev == BOARD_REV_AIR_RELAY
 
     def real_faults(self, error: int) -> List[str]:
         """Names of the error bits that are genuine faults on this board.
@@ -231,10 +234,11 @@ class Kjs03Sensor(Sensor):
         board unhealthy?" -- and the answer depends on the variant, which is
         board knowledge and so lives here rather than in whatever publishes it.
 
-        See :data:`AIRRELAY_REAL_ERROR_BITS`: an AIRRELAY permanently flags the
-        proximity and magnetic-encoder parts it is not fitted with.
+        See :data:`AIR_RELAY_REAL_ERROR_BITS`: an air relay board on older
+        firmware permanently flags the proximity and magnetic-encoder parts it
+        is not fitted with.
         """
-        mask = AIRRELAY_REAL_ERROR_BITS if self.has_valves else 0xFF
+        mask = AIR_RELAY_REAL_ERROR_BITS if self.has_valves else 0xFF
         return [name for bit, name in sorted(HW_ERR_BITS.items())
                 if error & bit & mask]
 
@@ -260,16 +264,18 @@ class Kjs03Sensor(Sensor):
 
         model = dxl.from_le(data[0:2])
         magic = dxl.from_le(data[2:6])
-        if model != KJS03_MODEL_NUMBER or magic != KJS03_MODEL_INFO_MAGIC:
+        if (model != AIR_RELAY_BOARD_MODEL_NUMBER
+                or magic != AIR_RELAY_BOARD_MODEL_INFO_MAGIC):
             raise CapabilityError(
-                "id {} reports model {} / info {:#010x}; expected KJS-03 "
-                "({} / {:#010x}). Refusing to read a control table that may "
-                "belong to a different device.".format(
-                    self.id, model, magic, KJS03_MODEL_NUMBER,
-                    KJS03_MODEL_INFO_MAGIC))
+                "id {} reports model {} / info {:#010x}; expected an air "
+                "relay board ({} / {:#010x}). Refusing to read a control "
+                "table that may belong to a different device.".format(
+                    self.id, model, magic, AIR_RELAY_BOARD_MODEL_NUMBER,
+                    AIR_RELAY_BOARD_MODEL_INFO_MAGIC))
 
-        self.ranges = Kjs03Ranges(gyro_dps=float(dxl.from_le(data[12:14])),
-                                  accel_g=float(dxl.from_le(data[14:16])))
+        self.ranges = AirRelayBoardRanges(
+            gyro_dps=float(dxl.from_le(data[12:14])),
+            accel_g=float(dxl.from_le(data[14:16])))
         git_hash = dxl.from_le(data[REG_FIRMWARE_GIT_HASH:REG_FIRMWARE_GIT_HASH + 4])
         if git_hash == 0:
             firmware_git = "unknown (built before the commit was published)"
@@ -390,7 +396,7 @@ class Kjs03Sensor(Sensor):
         for bit, name in HW_ERR_BITS.items():
             out["hardware_error/{}".format(name)] = 1.0 if error & bit else 0.0
 
-        if data[at(REG_BOARD_REV)] == BOARD_REV_AIRRELAY:
+        if data[at(REG_BOARD_REV)] == BOARD_REV_AIR_RELAY:
             out["air/pressure"] = s16(REG_PRESSURE_CKPA) / 100.0  # centi-kPa
             out["air/valve_state"] = float(data[at(REG_VALVE_STATE)])
             out["air/gpio_state"] = float(data[at(REG_GPIO_STATE)])
@@ -424,8 +430,8 @@ class Kjs03Sensor(Sensor):
         """
         if not self.has_valves:
             raise CapabilityError(
-                "id {}: this board is a KJS-03 (rev {}), not an AIRRELAY; it "
-                "has no gripper".format(self.id, self.board_rev))
+                "id {}: this board is a sensor-only KJS-03 (rev {}), not an "
+                "air relay board; it has no gripper".format(self.id, self.board_rev))
         if self.hw_variant is None:
             raise CapabilityError(
                 "id {}: the board has not been read yet, so its valve stage "
@@ -465,8 +471,8 @@ class Kjs03Sensor(Sensor):
         """
         if not self.has_valves:
             raise CapabilityError(
-                "id {}: this board is a KJS-03 (rev {}), not an AIRRELAY; it "
-                "has no valves".format(self.id, self.board_rev))
+                "id {}: this board is a sensor-only KJS-03 (rev {}), not an "
+                "air relay board; it has no valves".format(self.id, self.board_rev))
         if isinstance(state, str):
             if state not in VALVE_STATES:
                 raise ValueError("unknown valve state {!r}; known: {}".format(

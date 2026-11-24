@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Read and drive a KJS-03 / AIRRELAY vacuum board on a DYNAMIXEL bus.
+"""Read and drive an air relay board (vacuum gripper) on a DYNAMIXEL bus.
 
 The board sits on the same bus as the servos and speaks DYNAMIXEL 2.0, but it
-is not a motor: it carries a pressure sensor, an IMU, and (on the AIRRELAY
-variant) a pump + relay driving a vacuum gripper. This tool exercises it through
-the same ``Kjs03Sensor`` plugin the driver uses, so what works here works in the
-stack -- there is no second, tool-only code path.
+is not a motor: it carries a pressure sensor, an IMU, and (on the air relay
+board, not the sensor-only KJS-03) a pump + relay driving a vacuum gripper.
+This tool exercises it through the same ``AirRelayBoardSensor`` plugin the
+driver uses, so what works here works in the stack -- there is no second,
+tool-only code path.
 
 Commands
 --------
@@ -21,7 +22,7 @@ Why ``release`` is its own thing, and not the firmware's VALVE_STATE
 Measured on hardware: the firmware's VALVE_STATE "release" leaves the relay
 energised and *holds* the vacuum (~-42 kPa) rather than venting. The gripper is
 only actually released by dropping the relay, so every command here writes
-GPIO_STATE directly (``Kjs03Sensor.encode_air``). A release that does not
+GPIO_STATE directly (``AirRelayBoardSensor.encode_air``). A release that does not
 release would be silent breakage: a command reporting success while doing
 something else.
 
@@ -41,15 +42,16 @@ from typing import Optional
 
 from actuo.core.contracts import CapabilityError
 from actuo.drivers import dynamixel_protocol as dxl
-from actuo.drivers.sensors.kjs03 import AIR_OPS, Kjs03Sensor
+from actuo.drivers.sensors.air_relay_board import AIR_OPS, AirRelayBoardSensor
 from actuo.drivers.transports.serial_transport import SerialTransport
 
 
-def _read_identity(transport: SerialTransport, sensor: Kjs03Sensor,
+def _read_identity(transport: SerialTransport, sensor: AirRelayBoardSensor,
                    timeout: float) -> Optional[dict]:
     """Read the board's identity block; return its fields or None if silent.
 
-    Doubles as the "is this really a KJS-03" check -- ``decode_identity``
+    Doubles as the "is this really an air relay board" check --
+    ``decode_identity``
     refuses a model/magic mismatch rather than reading a stranger's table.
     """
     reply = transport.transact(sensor.encode_identity_query(), timeout)[0]
@@ -58,7 +60,7 @@ def _read_identity(transport: SerialTransport, sensor: Kjs03Sensor,
     return sensor.decode_identity(reply)
 
 
-def _read_state(transport: SerialTransport, sensor: Kjs03Sensor,
+def _read_state(transport: SerialTransport, sensor: AirRelayBoardSensor,
                 timeout: float) -> Optional[dict]:
     reply = transport.transact(sensor.encode_query(), timeout)[0]
     if reply is None:
@@ -81,12 +83,12 @@ def _fmt_state(state: dict) -> str:
             acc[0], acc[1], acc[2], mag))
     err = int(state.get("hardware_error", 0))
     flagged = [n for bit, n in ((0x01, "imu"), (0x08, "adc")) if err & bit]
-    if flagged:  # proximity/magenc absent is normal on AIRRELAY; only flag real ones
+    if flagged:  # absent proximity/magenc is normal here; flag real ones
         parts.append("HW_ERR={}".format(",".join(flagged)))
     return "  ".join(parts)
 
 
-def _apply(transport: SerialTransport, sensor: Kjs03Sensor, op: str,
+def _apply(transport: SerialTransport, sensor: AirRelayBoardSensor, op: str,
            timeout: float) -> bool:
     """Send an air command and confirm the write was acknowledged."""
     frame = sensor.encode_air(op)
@@ -94,7 +96,8 @@ def _apply(transport: SerialTransport, sensor: Kjs03Sensor, op: str,
     return ack is not None
 
 
-def _monitor(transport: SerialTransport, sensor: Kjs03Sensor, seconds: float,
+def _monitor(transport: SerialTransport, sensor: AirRelayBoardSensor,
+             seconds: float,
              timeout: float, period: float = 0.3) -> None:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -108,17 +111,18 @@ def _monitor(transport: SerialTransport, sensor: Kjs03Sensor, seconds: float,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Read/drive a KJS-03 AIRRELAY vacuum board over DYNAMIXEL.")
+        description="Read/drive an air relay board (vacuum gripper) over "
+                    "DYNAMIXEL.")
     parser.add_argument("command",
                         choices=["read"] + sorted(AIR_OPS),
                         help="read (monitor) or an air op: %s" % ", ".join(
                             sorted(AIR_OPS)))
     parser.add_argument("--config", default=None,
-                        help="robot config YAML; reads channel + the kjs03 "
+                        help="robot config YAML; reads channel + the air_relay_board "
                              "sensor's id from it (its sensors: section)")
     parser.add_argument("--sensor", default=None,
                         help="with --config, name of the sensor to use "
-                             "(default: the only/first kjs03 board)")
+                             "(default: the only/first air_relay_board sensor)")
     parser.add_argument("--channel", default=None,
                         help="serial device, e.g. /dev/ttyUSB0 "
                              "(overrides the config's channel)")
@@ -143,10 +147,10 @@ def main(argv=None) -> int:
             cfg_channel = None
         channel = channel or cfg_channel
         boards = [(n, s) for n, s in build_sensors(document.get("sensors"))
-                  if isinstance(s, Kjs03Sensor)
+                  if isinstance(s, AirRelayBoardSensor)
                   and (args.sensor is None or n == args.sensor)]
         if not boards:
-            print("no kjs03 sensor{} in {}".format(
+            print("no air_relay_board sensor{} in {}".format(
                 " named %r" % args.sensor if args.sensor else "", args.config),
                 file=sys.stderr)
             return 2
@@ -168,7 +172,7 @@ def main(argv=None) -> int:
         return 2
 
     try:
-        sensor = Kjs03Sensor(device_id)
+        sensor = AirRelayBoardSensor(device_id)
         identity = _read_identity(transport, sensor, args.timeout)
         if identity is None:
             print("id {} did not answer on {}. Is the board powered and on "
@@ -179,13 +183,13 @@ def main(argv=None) -> int:
         # decides has_valves -- do it before any air command so the gripper
         # check is answered by the hardware, not by an assumption.
         first = _read_state(transport, sensor, args.timeout)
-        print("KJS-03 id {}: model {:#06x}  fw {} ({})  IMU +/-{:.0f} dps / +/-{:.0f} g"
-              "  {}".format(
+        print("air relay board id {}: model {:#06x}  fw {} ({})  "
+              "IMU +/-{:.0f} dps / +/-{:.0f} g  {}".format(
                   device_id, identity["model_number"], identity["firmware_version"],
                   identity["firmware_git"],
                   identity["gyro_range_dps"], identity["accel_range_g"],
-                  "AIRRELAY (has gripper)" if sensor.has_valves
-                  else "KJS-03 (no gripper)"))
+                  "has gripper" if sensor.has_valves
+                  else "sensor-only KJS-03 (no gripper)"))
 
         if args.command == "read":
             _monitor(transport, sensor, args.seconds, args.timeout)

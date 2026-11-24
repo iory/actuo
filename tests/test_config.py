@@ -274,18 +274,18 @@ def test_a_malformed_package_reference_is_refused(tmp_path):
 
 
 # --- sensors (non-joint devices on the bus) ----------------------------------
-def test_build_sensors_instantiates_a_kjs03_from_config():
+def test_build_sensors_instantiates_an_air_relay_board_from_config():
     """A `sensors:` entry becomes a plugin instance, data-driven and with no
     core edit -- the same open/closed contract the actuators use."""
     from actuo.drivers.config import build_sensors
-    from actuo.drivers.sensors.kjs03 import Kjs03Sensor
+    from actuo.drivers.sensors.air_relay_board import AirRelayBoardSensor
 
     built = build_sensors([{"name": "air_board",
-                            "sensor": {"plugin": "kjs03", "id": 19}}])
+                            "sensor": {"plugin": "air_relay_board", "id": 19}}])
     assert len(built) == 1
     name, sensor = built[0]
     assert name == "air_board"
-    assert isinstance(sensor, Kjs03Sensor)
+    assert isinstance(sensor, AirRelayBoardSensor)
     assert sensor.id == 19
 
 

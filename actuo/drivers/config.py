@@ -555,12 +555,12 @@ def build_actuators(joints: List[Dict[str, Any]]) -> Tuple[List[Actuator], List[
     return actuators, names
 
 
-def _build_kjs03(spec: Dict[str, Any], where: str):
-    """Build a KJS-03 / AIRRELAY sensor board from its config block."""
-    from actuo.drivers.sensors.kjs03 import Kjs03Sensor
+def _build_air_relay_board(spec: Dict[str, Any], where: str):
+    """Build an air relay board (or a sensor-only KJS-03) from its config block."""
+    from actuo.drivers.sensors.air_relay_board import AirRelayBoardSensor
     device_id = int(_require(spec, "id", where))
     # protocol 1: the FEETECH firmware build, on a FEETECH servo bus.
-    return Kjs03Sensor(device_id, board_rev=spec.get("board_rev"),
+    return AirRelayBoardSensor(device_id, board_rev=spec.get("board_rev"),
                        protocol=int(spec.get("protocol", 2)))
 
 
@@ -568,7 +568,7 @@ def _build_kjs03(spec: Dict[str, Any], where: str):
 #: same open/closed contract the actuators use -- no core edit, no protocol
 #: ``switch`` in shared code.
 _SENSOR_BUILDERS = {
-    "kjs03": _build_kjs03,
+    "air_relay_board": _build_air_relay_board,
 }
 
 
