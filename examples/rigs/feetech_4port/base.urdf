@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<robot name="base">
+  <link name="base_link"/>
+  <link name="j1_link"/>
+  <joint name="j1" type="revolute"><parent link="base_link"/><child link="j1_link"/>
+    <origin xyz="0 0 0.05"/><axis xyz="0 0 1"/><limit lower="-3.2" upper="3.2" effort="5" velocity="3"/></joint>
+  <ros2_control name="arm" type="system"><joint name="j1"/></ros2_control>
+</robot>

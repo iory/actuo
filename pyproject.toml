@@ -83,3 +83,6 @@ include = ["actuo*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "hardware: needs a real rig named by ACTUO_RIG (tests/hardware); skipped otherwise",
+]

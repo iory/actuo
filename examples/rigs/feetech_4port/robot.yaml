@@ -1,0 +1,16 @@
+# id N on PORT N (renumbered with servo-fault-injector host/assign_ids.py).
+bus:
+  transport:
+    plugin: serial
+    channel: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B91044152-if00
+    bitrate: 1000000
+  hot_plug: true
+joints:
+  - name: j1
+    actuator: {plugin: feetech_sts, id: 1, model: STS3215}
+  - name: j2
+    actuator: {plugin: feetech_sts, id: 2, model: STS3215}
+  - name: j3
+    actuator: {plugin: feetech_sts, id: 3, model: HLS3950M}
+  - name: j4
+    actuator: {plugin: feetech_sts, id: 4, model: HLS3950M}

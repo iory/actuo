@@ -72,6 +72,36 @@ the attached joints; naming a detached joint is an error. A servo that stops
 answering is switched off, its motion is dropped and its measurement becomes
 NaN, so when it is plugged back in it comes back limp, from where it then is.
 
+### Testing it on hardware: fault injectors and rigs
+
+`actuo.testing` makes servos come and go on purpose, so a robot that is
+plugged together at run time (`robot_modes`: `fixed`, `tool_change`,
+`reconfigurable`) can be tested without anyone pulling cables:
+
+- `actuo.testing.fault_injectors`: one interface (`unplug`, `plug`,
+  `drop_replies`, `restore`) over the hardware in the servo line --
+  [iory/servo-fault-injector](https://github.com/iory/servo-fault-injector)
+  (four ports, each with its own power and signal switch; any FEETECH /
+  DYNAMIXEL TTL / KRS speed) and
+  [iory/ics-fault-relay](https://github.com/iory/ics-fault-relay)
+  (Kondo ICS at 115200 bit/s, one servo at a time).
+- `actuo.testing.rig`: a rig file names the robot config, its URDF, the
+  `robot_modes` descriptions to check and which port each joint is on, so
+  tests speak in joints (`rig.only(["j1", "j3"])`).
+
+```sh
+ACTUO_RIG=examples/rigs/feetech_4port/rig.yaml python -m pytest tests/hardware -v
+```
+
+The hardware tests (skipped unless `ACTUO_RIG` is set) run the robot interface
+on the rig's bus with torque off and check, for **every combination** of
+plugged joints, that `attached_joints()` becomes that combination and that
+each `robot_modes` description selects from the live bus the same robot, with
+the same problems, as from the combination itself; and that a joint whose
+replies are cut while its commands still arrive is detached and comes back.
+On 2026-11-24 they passed on `examples/rigs/feetech_4port` (two STS3215, two
+HLS3950M, 1 Mbit/s): 16 combinations x 2 descriptions in about 20 s.
+
 ## With ROS 2: the servicer and shared memory
 
 The **servicer** is the process that owns the bus and services the
