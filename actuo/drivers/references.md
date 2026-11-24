@@ -603,18 +603,21 @@ not, so the floor must be **measured** — `actuo-dxl-probe` prints min/max roun
 trip and calls out a >10 ms floor explicitly: bus latency is measured and
 exposed, never assumed.
 
-### KJS-03 / AIRRELAY sensor board
+### Air relay board
 
 A custom board that impersonates a DYNAMIXEL device on the servo bus: IMU, four
-proximity sensors, five ADC channels, a magnetic encoder, and on the AIRRELAY
-variant two solenoid valves for a vacuum gripper. It replaces the rcb4-era "air
+proximity sensors, five ADC channels, a magnetic encoder, and (except on the
+sensor-only KJS-03 variant) two solenoid valves for a vacuum gripper. It
+replaces the rcb4-era "air
 board", which was reached through `ri.control_air_board(38, 'open_relay_valve')`
-— an ad-hoc method on a god-object. Here it is `actuo/drivers/sensors/kjs03.py`,
+— an ad-hoc method on a god-object. Here it is
+`actuo/drivers/sensors/air_relay_board.py`,
 registered via `register_sensor`, publishing named `ChannelSpec` channels
 (telemetry is named channels, never a widened shared struct) with **zero
 `actuo.core` edits**.
 
-- Control table: `KJS-03/docs/CONTROL_TABLE.md` (firmware v2), generated from
+- Control table: `KJS-03/docs/CONTROL_TABLE.md` in the firmware repository
+  (firmware v2), generated from
   the firmware's own `include/control_table.h`.
   <https://github.com/iory/KJS-03>
 

@@ -804,7 +804,7 @@ def run_real(args):
     n = len(joint_names)
     mode = OperatingMode[args.mode.upper()]
 
-    # Non-joint devices on the same bus (KJS-03 air/IMU board, ...). They share
+    # Non-joint devices on the same bus (the air relay board, ...). They share
     # the transport with the servos, so they are serviced from this same loop --
     # a second process on the same serial port is not a thing.
     sensors = [] if args.no_sensors else load_sensors(args.config)
@@ -878,9 +878,10 @@ def run_real(args):
                       file=sys.stderr, flush=True)
 
         # Identify every sensor board BEFORE the control loop starts. This is
-        # what teaches a KJS-03 its IMU full scale; without it the board reports
-        # raw counts only and the telemetry publisher deliberately emits no Imu
-        # message rather than one that looks like m/s^2 and is not.
+        # what teaches an air relay board its IMU full scale; without it the
+        # board reports raw counts only and the telemetry publisher
+        # deliberately emits no Imu message rather than one that looks like
+        # m/s^2 and is not.
         live_sensors = []
         for name, sensor in sensors:
             try:

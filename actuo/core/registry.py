@@ -44,7 +44,7 @@ _BUILTIN_ACTUATORS: Dict[str, Tuple[str, "str | None"]] = {
     "kondo_ics_wheel": ("actuo.drivers.actuators.kondo_ics_wheel", "kondo"),
 }
 _BUILTIN_SENSORS: Dict[str, Tuple[str, "str | None"]] = {
-    "kjs03": ("actuo.drivers.sensors.kjs03", None),
+    "air_relay_board": ("actuo.drivers.sensors.air_relay_board", None),
 }
 
 

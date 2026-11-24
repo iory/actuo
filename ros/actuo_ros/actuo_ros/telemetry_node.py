@@ -16,7 +16,8 @@ Two channels are handled here:
 
 ``imu/*``
     Published as ``sensor_msgs/Imu`` -- but ONLY once the board has told us its
-    full scale. Until :meth:`Kjs03Sensor.decode_identity` has run, the driver
+    full scale. Until :meth:`AirRelayBoardSensor.decode_identity` has run, the
+    driver
     reports raw counts and no scaled values, and an ``Imu`` message filled with
     counts would look exactly like one filled with m/s^2. So a sensor with no
     known range gets no Imu topic and says so, rather than publishing a number
@@ -106,7 +107,7 @@ class SensorTelemetryPublisher:
                 self._imu_pubs[name] = node.create_publisher(
                     Imu, "~/{}/imu".format(name), _TELEMETRY_QOS)
             # The pressure publisher is created lazily in publish(), not here.
-            # A KJS-03 only knows it is the AIRRELAY variant -- the one with the
+            # The plugin only knows it is an air relay board -- the one with the
             # pump -- after its first sensor block, because the board revision
             # register sits outside the identity block. At construction time the
             # air channels do not exist yet, so deciding here would silently
@@ -180,9 +181,9 @@ class SensorTelemetryPublisher:
         knows cleared.
 
         Which bits count as a fault is asked of the sensor, not decided here --
-        a board that permanently flags parts it is not fitted with (the KJS-03
-        AIRRELAY does) would otherwise fire a warning on every run and teach
-        the operator to ignore the one that matters.
+        a board that permanently flags parts it is not fitted with (the air
+        relay board did, before KJS-03 3929a24) would otherwise fire a warning
+        on every run and teach the operator to ignore the one that matters.
         """
         error = int(telemetry.get("hardware_error", 0))
         if error == self._last_error.get(name, 0):
