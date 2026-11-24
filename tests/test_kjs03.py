@@ -28,9 +28,12 @@ def status(device_id, params):
                  address=device_id)
 
 
-def identity_block(model=KJS03_MODEL_NUMBER, magic=KJS03_MODEL_INFO_MAGIC):
-    return (dxl.to_le(model, 2) + dxl.to_le(magic, 4) + bytes([2, DEVICE_ID, 3, 0])
-            + bytes([2, 0]) + dxl.to_le(2000, 2) + dxl.to_le(16, 2))
+def identity_block(model=KJS03_MODEL_NUMBER, magic=KJS03_MODEL_INFO_MAGIC,
+                   git_hash=0x512DC77A, dirty=0):
+    block = (dxl.to_le(model, 2) + dxl.to_le(magic, 4) + bytes([2, DEVICE_ID, 3, 0])
+             + bytes([2, 0]) + dxl.to_le(2000, 2) + dxl.to_le(16, 2))
+    block += bytes(52 - len(block))                     # indirect map, pump output
+    return block + dxl.to_le(git_hash, 4) + bytes([dirty])
 
 
 def sensor_block(gyro=(0, 0, 0), acc=(0, 0, 0), pressure_ckpa=0,
@@ -61,6 +64,17 @@ def test_identity_reads_the_imu_ranges_off_the_board():
     info = board.decode_identity(status(DEVICE_ID, identity_block()))
     assert info["model_number"] == KJS03_MODEL_NUMBER
     assert board.ranges == Kjs03Ranges(gyro_dps=2000.0, accel_g=16.0)
+
+
+def test_identity_names_the_commit_the_firmware_was_built_from():
+    board = Kjs03Sensor(DEVICE_ID)
+    assert board.decode_identity(status(DEVICE_ID, identity_block()))[
+        "firmware_git"] == "512dc77a"
+    assert board.decode_identity(status(DEVICE_ID, identity_block(dirty=1)))[
+        "firmware_git"] == "512dc77a-dirty"
+    # Older firmware leaves the bytes cleared: say so, do not print 00000000.
+    assert board.decode_identity(status(DEVICE_ID, identity_block(git_hash=0)))[
+        "firmware_git"].startswith("unknown")
 
 
 def test_a_model_number_collision_is_refused():

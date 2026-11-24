@@ -179,9 +179,10 @@ def main(argv=None) -> int:
         # decides has_valves -- do it before any air command so the gripper
         # check is answered by the hardware, not by an assumption.
         first = _read_state(transport, sensor, args.timeout)
-        print("KJS-03 id {}: model {:#06x}  fw {}  IMU +/-{:.0f} dps / +/-{:.0f} g"
+        print("KJS-03 id {}: model {:#06x}  fw {} ({})  IMU +/-{:.0f} dps / +/-{:.0f} g"
               "  {}".format(
                   device_id, identity["model_number"], identity["firmware_version"],
+                  identity["firmware_git"],
                   identity["gyro_range_dps"], identity["accel_range_g"],
                   "AIRRELAY (has gripper)" if sensor.has_valves
                   else "KJS-03 (no gripper)"))

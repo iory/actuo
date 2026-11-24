@@ -59,6 +59,11 @@ REG_MODEL_INFO = 2
 REG_FIRMWARE_VERSION = 6
 REG_GYRO_RANGE_DPS = 12
 REG_ACCEL_RANGE_G = 14
+# The commit the firmware was built from (KJS-03 512dc77 and later; zero on
+# older builds, whose table leaves these bytes cleared).
+REG_FIRMWARE_GIT_HASH = 52    # uint32 LE: the first 8 hex digits of the commit
+REG_FIRMWARE_GIT_DIRTY = 56   # 1 = built with uncommitted changes
+IDENTITY_BLOCK_LEN = REG_FIRMWARE_GIT_DIRTY + 1  # 57
 
 REG_GYRO_X = 64
 REG_ADC_0 = 76
@@ -234,8 +239,9 @@ class Kjs03Sensor(Sensor):
                 if error & bit & mask]
 
     def encode_identity_query(self) -> List[Frame]:
-        """READ the EEPROM block that identifies the board and its IMU ranges."""
-        payload = dxl.build_read(self.protocol, self.id, REG_MODEL_NUMBER, 16)
+        """READ the EEPROM block that identifies the board, its build and IMU ranges."""
+        payload = dxl.build_read(self.protocol, self.id, REG_MODEL_NUMBER,
+                                 IDENTITY_BLOCK_LEN)
         return [Frame(payload=payload, address=self.id)]
 
     def decode_identity(self, frame: Frame) -> Dict[str, object]:
@@ -249,7 +255,7 @@ class Kjs03Sensor(Sensor):
         if parsed is None or parsed[0] != self.id:
             raise ValueError("id {}: not this device's status".format(self.id))
         data = parsed[2]
-        if len(data) < 16:
+        if len(data) < IDENTITY_BLOCK_LEN:
             raise ValueError("id {}: short identity block".format(self.id))
 
         model = dxl.from_le(data[0:2])
@@ -264,8 +270,15 @@ class Kjs03Sensor(Sensor):
 
         self.ranges = Kjs03Ranges(gyro_dps=float(dxl.from_le(data[12:14])),
                                   accel_g=float(dxl.from_le(data[14:16])))
+        git_hash = dxl.from_le(data[REG_FIRMWARE_GIT_HASH:REG_FIRMWARE_GIT_HASH + 4])
+        if git_hash == 0:
+            firmware_git = "unknown (built before the commit was published)"
+        else:
+            firmware_git = "{:08x}{}".format(
+                git_hash, "-dirty" if data[REG_FIRMWARE_GIT_DIRTY] else "")
         return {"model_number": model,
                 "firmware_version": data[6],
+                "firmware_git": firmware_git,
                 "gyro_range_dps": self.ranges.gyro_dps,
                 "accel_range_g": self.ranges.accel_g}
 
