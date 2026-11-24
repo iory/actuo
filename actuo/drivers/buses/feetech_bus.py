@@ -62,6 +62,27 @@ from feetech_cli.registers import CONTROL_TABLE
 
 _TORQUE_ENABLE = CONTROL_TABLE["torque_enable"].address
 
+#: Counts an HLS origin may land away from the pose asked for (set_origin).
+HLS_ORIGIN_SLACK = 16
+
+
+def hls_homing_offset(raw: int, target: int, max_offset: int,
+                      resolution: int) -> Tuple[int, int]:
+    """``(homing_offset, landed count)`` that makes ``raw`` read near ``target``
+    on an HLS servo.
+
+    An HLS takes a negative homing offset into its register and ignores it: an
+    HLS3950M given -2046 read it back as -2046 and went on reading the same
+    position (2026-11-24); 2047 took effect at once. ``present = (raw - offset)
+    mod resolution`` with the offset in ``0..max_offset``, so a pose that needs
+    a negative offset gets the largest one, and lands that many counts away.
+    """
+    new = raw - target
+    if new >= 0:
+        return new, target
+    return max_offset, (raw - max_offset) % resolution
+
+
 #: SYNC_READs in a row without a reply that make a hot-plug servo absent.
 DEFAULT_ABSENT_AFTER_MISSES = 3
 #: read_batch calls between probes of an absent servo.
@@ -504,6 +525,10 @@ class FeetechBus(Bus):
         be within 2 counts of ``position``, else this raises rather than
         report a calibration that did not happen.
 
+        An HLS ignores a negative homing offset (see :func:`hls_homing_offset`):
+        a pose that needs one is declared up to ``HLS_ORIGIN_SLACK`` counts away
+        from ``position``, and ``reported`` says where.
+
         Parameters
         ----------
         index : int
@@ -546,6 +571,15 @@ class FeetechBus(Bus):
         present = read("present_position")
         raw = (present + old) % RESOLUTION
         new = raw - target
+        if actuator.is_hls and new < 0:
+            new, landed = hls_homing_offset(raw, target, MAX_HOMING_OFFSET, RESOLUTION)
+            if abs(landed - target) > HLS_ORIGIN_SLACK:
+                raise ValueError(
+                    "id {}: an HLS takes no negative homing offset, and the nearest "
+                    "it can do reads count {} instead of {}; turn the horn so the "
+                    "pose is on the other side of the middle".format(
+                        actuator.id, landed, target))
+            target = landed
         if abs(new) > MAX_HOMING_OFFSET:
             raise ValueError(
                 "id {}: declaring this pose {:+.4f} rad needs a homing offset of "

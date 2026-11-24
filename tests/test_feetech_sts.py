@@ -397,3 +397,10 @@ def test_bus_overrides_reach_the_feetech_bus(tmp_path):
         "    actuator: {plugin: feetech_sts, id: 1, model: STS3215}\n")
     bus, _ = build_bus(str(path), bus_overrides={"hot_plug": True, "watch_ids": [2, 3]})
     assert bus.hot_plug and bus.watch_ids == (2, 3)
+
+
+def test_an_hls_origin_that_needs_a_negative_offset_takes_the_largest_positive_one():
+    from actuo.drivers.buses.feetech_bus import hls_homing_offset
+
+    assert hls_homing_offset(4087, 2048, 2047, 4096) == (2039, 2048)   # positive: exact
+    assert hls_homing_offset(2, 2048, 2047, 4096) == (2047, 2051)      # 3 counts away
