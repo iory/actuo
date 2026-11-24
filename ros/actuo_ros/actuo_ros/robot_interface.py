@@ -150,13 +150,17 @@ def _wait_future(future, timeout, what, clock=None):
 
 def fetch_robot(controllers=None, manager='/controller_manager',
                 timeout=10.0, load_meshes=True, model_class=None,
-                description_topic='/robot_description'):
+                description_topic='/robot_description', active_only=True):
     """The model and controller joints of the running robot.
 
     Parameters
     ----------
     controllers : sequence of str or None
-        Trajectory controllers to drive; ``None``: every loaded one.
+        Trajectory controllers to drive; ``None``: every loaded one whose
+        joints are all in the model (and that is active, with
+        ``active_only``). A modular robot (``modular.launch.py``) has every
+        configuration's controllers loaded; only the running configuration's
+        are active and command joints of its model.
     manager : str
         The controller manager node.
     timeout : float
@@ -169,6 +173,9 @@ def fetch_robot(controllers=None, manager='/controller_manager',
     description_topic : str
         Where robot_state_publisher publishes the URDF. A namespaced bring-up
         (``/my_robot``) publishes it as ``/my_robot/robot_description``.
+    active_only : bool
+        With ``controllers=None``, take only active controllers: an inactive
+        one rejects every goal.
 
     Returns
     -------
@@ -204,11 +211,14 @@ def fetch_robot(controllers=None, manager='/controller_manager',
         node.destroy_node()
 
     loaded = {c.name: c for c in future.result().controller}
-    if controllers is None:
+    chosen = controllers is None
+    if chosen:
         controllers = sorted(name for name, c in loaded.items()
-                             if c.type == TRAJECTORY_CONTROLLER)
+                             if c.type == TRAJECTORY_CONTROLLER
+                             and (c.state == 'active' or not active_only))
         if not controllers:
-            raise RuntimeError('no {} is loaded'.format(TRAJECTORY_CONTROLLER))
+            raise RuntimeError('no {}{} is loaded'.format(
+                'active ' if active_only else '', TRAJECTORY_CONTROLLER))
     missing = [name for name in controllers if name not in loaded]
     if missing:
         raise RuntimeError(
@@ -230,6 +240,15 @@ def fetch_robot(controllers=None, manager='/controller_manager',
                 robot = model_class(urdf_file=handle.name)
     finally:
         os.unlink(handle.name)
+    if chosen:
+        # Controllers of joints the model does not have belong to another
+        # robot (another configuration of a modular one).
+        model_joints = {j.name for j in robot.joint_list}
+        controller_joints = {name: joints for name, joints in controller_joints.items()
+                             if set(joints) <= model_joints}
+        if not controller_joints:
+            raise RuntimeError('no {} commands joints of {}'.format(
+                TRAJECTORY_CONTROLLER, description_topic))
     return robot, controller_joints
 
 
@@ -256,6 +275,11 @@ class RobotInterface(ROS2RobotInterfaceBase):
         self._controller_joints = dict(controller_joints)
         self._servo_ns = servo_ns
         kwargs.setdefault('node_name', NODE_NAME)
+        # A robot with one joint_state_broadcaster per module (modular.launch.py)
+        # gets several partial joint_states in the same controller cycle; with
+        # a queue of 1 every one but the last of them is dropped, and those
+        # joints are never measured.
+        kwargs.setdefault('joint_states_queue_size', 10)
         # 3 s (the default) can be shorter than discovering the action servers.
         kwargs.setdefault('controller_timeout', 15)
         super(RobotInterface, self).__init__(robot, **kwargs)
@@ -394,11 +418,18 @@ class RobotInterface(ROS2RobotInterfaceBase):
         self.get_logger().info(result.reason)
 
     def _measured_angles(self):
-        """``{joint name: angle}`` from the latest joint_states, unclamped."""
-        msg = self._joint_state_msg
-        if msg is None:
+        """``{joint name: angle}`` as last published, unclamped.
+
+        Every joint_states message so far, by name, not the latest message: a
+        robot whose broadcasters each publish some of its joints (one per
+        module) never has them all in one message.
+        """
+        if self._joint_state_msg is None:
             raise RuntimeError('no joint_states yet')
-        return dict(zip(msg.name, msg.position))
+        measured = dict(getattr(self, '_measured', {}))
+        msg = self._joint_state_msg
+        measured.update(zip(msg.name, msg.position))
+        return measured
 
     def _send_measured(self, controllers, targets, duration):
         """Send each controller its joints' measured angles, or ``targets``.
@@ -767,6 +798,20 @@ def connect(servo_ns='/actuo_bus_servicer', load_meshes=True, model_class=None,
                          namespace=ns or None, wait_for_joint_states=True,
                          **kwargs)
     rclpy.logging.set_logger_level(NODE_NAME, rclpy.logging.LoggingSeverity.INFO)
+    stop = _serve(ri)
+
+    def _close():
+        stop()
+        if rclpy.ok():
+            rclpy.shutdown()
+    atexit.register(_close)
+
+    robot.angle_vector(ri.angle_vector())
+    return robot, ri
+
+
+def _serve(ri):
+    """Spin ``ri`` in a thread; return what stops it and destroys the node."""
     executor = SingleThreadedExecutor()
     executor.add_node(ri)
 
@@ -781,14 +826,102 @@ def connect(servo_ns='/actuo_bus_servicer', load_meshes=True, model_class=None,
             pass
     thread = threading.Thread(target=_spin, daemon=True)
     thread.start()
+    stopped = []
 
-    def _close():
+    def _stop():
+        if stopped:
+            return
+        stopped.append(True)
         executor.shutdown()
         thread.join()
         ri.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
-    atexit.register(_close)
+    return _stop
 
-    robot.angle_vector(ri.angle_vector())
-    return robot, ri
+
+class ModularConnection:
+    """``robot`` and ``ri`` for whichever configuration of a modular robot runs.
+
+    A modular robot (``modular.launch.py``) becomes another robot when its
+    configuration changes: another model, other joints, other controllers.
+    This follows ``/actuo_configuration_manager/active`` (published once every
+    module of the running configuration whose servos answer is up, and again
+    when the modules that are up change) and builds ``robot`` and ``ri`` again,
+    as :func:`connect` does, on each message::
+
+        conn = ModularConnection()
+        robot, ri = conn.wait()               # the configuration running now
+        robot, ri = conn.wait('drill')        # ... or once drill runs
+
+    A ``ri`` of an earlier configuration is stopped when the next is built:
+    use the pair the last :meth:`wait` returned.
+
+    Parameters
+    ----------
+    active_topic : str
+        The configuration manager's ``~/active``.
+    **connect_kwargs
+        Passed to :class:`RobotInterface` as by :func:`connect`
+        (``servo_ns``, ``load_meshes``, ``model_class``, ...).
+    """
+
+    def __init__(self, active_topic='/actuo_configuration_manager/active',
+                 servo_ns='/actuo_bus_servicer', load_meshes=True, model_class=None,
+                 interface_class=None, **kwargs):
+        if not rclpy.ok():
+            rclpy.init()
+        self._options = dict(servo_ns=servo_ns, load_meshes=load_meshes,
+                             model_class=model_class, interface_class=interface_class,
+                             kwargs=kwargs)
+        self._cond = threading.Condition()
+        self._active = None
+        self._told = 0              # ~/active messages so far
+        self._built = 0             # the one robot and ri were built for
+        self._node = rclpy.create_node(NODE_NAME + '_configuration')
+        self._node.create_subscription(String, active_topic, self._on_active, LATCHED)
+        self._stop_node = _serve(self._node)
+        self.configuration = None
+        self.robot = None
+        self.ri = None
+        self._stop_ri = None
+        atexit.register(self.close)
+
+    def _on_active(self, msg):
+        with self._cond:
+            self._active = msg.data
+            self._told += 1
+            self._cond.notify_all()
+
+    def wait(self, configuration=None, timeout=30.0):
+        """``(robot, ri)`` of the running configuration (or of ``configuration``,
+        once it runs), built again if the configuration or its modules changed."""
+        deadline = monotonic() + timeout
+        with self._cond:
+            while not self._active or (configuration and self._active != configuration):
+                left = deadline - monotonic()
+                if left <= 0:
+                    raise RuntimeError('{} did not run within {} s (running: {})'.format(
+                        configuration or 'no configuration', timeout, self._active))
+                self._cond.wait(left)
+            active, told = self._active, self._told
+        if told != self._built:
+            self._build(active)
+            self._built = told
+        return self.robot, self.ri
+
+    def _build(self, configuration):
+        if self._stop_ri is not None:
+            self._stop_ri()
+        o = self._options
+        robot, controller_joints = fetch_robot(load_meshes=o['load_meshes'],
+                                               model_class=o['model_class'])
+        interface_class = o['interface_class'] or RobotInterface
+        ri = interface_class(robot, controller_joints, servo_ns=o['servo_ns'],
+                             wait_for_joint_states=True, **o['kwargs'])
+        self._stop_ri = _serve(ri)
+        robot.angle_vector(ri.angle_vector())
+        self.configuration, self.robot, self.ri = configuration, robot, ri
+
+    def close(self):
+        if self._stop_ri is not None:
+            self._stop_ri()
+        self._stop_node()

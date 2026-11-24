@@ -20,7 +20,9 @@ active one:
    component deactivates itself) and comes up again here when it is back.
 
 Reads the manifest ``ros2_control_files`` wrote. ``~/active`` (latched String)
-says which configuration ros2_control runs. With ``superset_topic`` it also
+names the configuration ros2_control runs, once every one of its modules whose
+servos answer is up (component and controllers), and again (the same name)
+whenever the set of its modules that are up changes. With ``superset_topic`` it also
 publishes, latched, the description with every configuration's components,
 for controller_manager (which takes its description from a topic, once).
 
@@ -104,6 +106,7 @@ class ConfigurationManager(Node):
         self.wanted = None          # configuration the servicer runs
         self.present = set()        # joints whose servos answer (servicer's view)
         self.active = None          # configuration ros2_control runs
+        self.announced = None       # (configuration, modules up) ~/active last told
         # controller_manager's own account of every controller and component,
         # kept from its activity topic (published on every change).
         self.controller_state = {}
@@ -207,10 +210,26 @@ class ConfigurationManager(Node):
             self._leave_all_but(wanted)
             self._set_model(wanted)
             self.active = wanted
-            self.active_pub.publish(String(data=wanted))
-            self.get_logger().info("ros2_control runs {} ({:.3f} s after the servicer said so)"
-                                   .format(wanted, time.monotonic() - self.wanted_at))
+            self.announced = None
         states, running = self._states()
+        modules = self.configurations[wanted]["modules"]
+        answering = [c for c, m in modules.items() if set(m["joints"]) <= present]
+        up = tuple(c for c, m in modules.items()
+                   if states.get(c) == State.PRIMARY_STATE_ACTIVE
+                   and set(m["controllers"]) <= running)
+        if set(answering) <= set(up) and self.announced != (wanted, up):
+            # Once every module whose servos answer is up -- a client
+            # connecting on this sees the whole robot, not half of its
+            # controllers -- and again whenever the modules that are up change
+            # (one plugged in later, one pulled out), so clients rebuild.
+            first = self.announced is None or self.announced[0] != wanted
+            self.announced = (wanted, up)
+            self.active_pub.publish(String(data=wanted))
+            if first:
+                self.get_logger().info("ros2_control runs {} ({:.3f} s after the servicer "
+                                       "said so)".format(wanted, time.monotonic() - self.wanted_at))
+            else:
+                self.get_logger().info("{}: modules up: {}".format(wanted, ", ".join(up)))
         for component, module in self.configurations[wanted]["modules"].items():
             if states.get(component) != State.PRIMARY_STATE_ACTIVE:
                 if not set(module["joints"]) <= present:
