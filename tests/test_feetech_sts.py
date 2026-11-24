@@ -16,6 +16,7 @@ pytest.importorskip("feetech_cli")
 
 from actuo.core.contracts import (  # noqa: E402
     ActuatorCommand, CapabilityError, Frame, OperatingMode)
+from actuo.core.diagnostics import DiagLevel  # noqa: E402
 from actuo.drivers import feetech_protocol as fp  # noqa: E402
 from actuo.drivers.actuators.feetech_sts import (  # noqa: E402
     FACTS_BLOCK_ADDR, FACTS_BLOCK_LEN, STATE_BLOCK_ADDR, STATE_BLOCK_LEN,
@@ -239,3 +240,128 @@ def test_write_batch_sends_goals_then_enables_and_releases_in_sync_writes():
     assert packets == [(fp.BROADCAST_ID, fp.SYNC_WRITE, 40),     # release id 2
                        (fp.BROADCAST_ID, fp.SYNC_WRITE, 42),     # goal id 1
                        (fp.BROADCAST_ID, fp.SYNC_WRITE, 40)]     # enable id 1
+
+
+# --- hot plug -------------------------------------------------------------------
+def make_hot_bus(states, configured, facts=None, **kwargs):
+    """A hot-plug bus configured for ``configured`` ids; ``states`` are plugged in."""
+    servos = {i: {"facts": (facts or {}).get(i, facts_block()), "state": s}
+              for i, s in states.items()}
+    line = FakeLine(servos)
+    actuators = [actuator(i, facts=False) for i in configured]
+    return FeetechBus(line, actuators, hot_plug=True, **kwargs), line
+
+
+def plug(line, servo_id, facts=None, state=None):
+    line.servos[servo_id] = {"facts": facts or facts_block(),
+                             "state": state or state_block()}
+    line.memory[servo_id] = {}
+
+
+def sync_write_items(packet):
+    """``{id: data}`` of one SYNC_WRITE packet."""
+    size = packet[6]
+    body = packet[7:-1]
+    return {body[k]: bytes(body[k + 1:k + 1 + size])
+            for k in range(0, len(body), size + 1)}
+
+
+def test_hot_plug_start_up_reports_a_missing_servo_and_carries_on():
+    bus, _ = make_hot_bus({1: state_block()}, [1, 2])
+    items = bus.verify_servos()
+    assert bus.present(1) and not bus.present(2)
+    assert items[1].level == DiagLevel.WARN
+    assert "start-up" in bus.absence_reason(2)
+    assert bus.absence_reason(1) == ""
+
+
+def test_without_hot_plug_a_missing_servo_still_stops_the_start_up():
+    bus, _ = make_bus({1: state_block()})
+    bus.actuators.append(actuator(2, facts=False))
+    with pytest.raises(RuntimeError, match="did not answer"):
+        bus.verify_servos()
+
+
+def test_an_absent_servo_is_left_out_of_the_sync_read():
+    """Kept in, every cycle would wait the whole timeout for its reply."""
+    bus, line = make_hot_bus({1: state_block()}, [1, 2], presence_period=100)
+    bus.verify_servos()
+    line.written.clear()
+    bus.read_batch()
+    sync = [p for p in line.written if p[4] == fp.SYNC_READ]
+    assert len(sync) == 1 and list(sync[0][7:-1]) == [1]
+
+
+def test_a_servo_plugged_in_is_probed_checked_and_then_read():
+    bus, line = make_hot_bus({1: state_block()}, [1, 2], presence_period=2)
+    bus.verify_servos()
+    plug(line, 2, facts=facts_block(mode=2), state=state_block(position=3072))
+    bus.read_batch()                      # first read: no probe yet
+    assert not bus.present(2)
+    bus.read_batch()                      # second read: probe, start-up check
+    assert bus.present(2)
+    assert line.memory[2][33] == 0        # put back in position mode
+    assert line.memory[2][48] == 232 and line.memory[2][49] == 3  # torque limit
+    states = bus.read_batch()
+    assert states[1].position == pytest.approx(math.pi / 2)
+
+
+def test_a_servo_unplugged_goes_absent_after_the_misses_and_gets_no_goal():
+    bus, line = make_hot_bus({1: state_block(), 2: state_block()}, [1, 2],
+                             absent_after_misses=3, presence_period=100)
+    bus.verify_servos()
+    bus.read_batch()
+    del line.servos[2]
+    bus.read_batch()
+    bus.read_batch()
+    assert bus.present(2)                 # two lost replies are not a lost module
+    bus.read_batch()
+    assert not bus.present(2) and "3 reads" in bus.absence_reason(2)
+
+    line.written.clear()
+    bus.write_batch([ActuatorCommand(OperatingMode.POSITION, position=0.0)] * 2)
+    writes = [(p[5], sync_write_items(p)) for p in line.written
+              if p[4] == fp.SYNC_WRITE]
+    goals = [items for address, items in writes if address == 42]
+    torque = [items for address, items in writes if address == 40]
+    assert [sorted(g) for g in goals] == [[1]]          # no goal to id 2
+    assert {2: b"\x00"} in torque                       # id 2: torque off only
+    assert {1: b"\x01"} in torque
+
+
+def test_a_servo_of_another_model_plugged_in_stays_absent_with_the_reason():
+    bus, line = make_hot_bus({1: state_block()}, [1, 2], presence_period=1)
+    bus.verify_servos()
+    plug(line, 2, facts=facts_block(model=4618))
+    bus.read_batch()
+    assert not bus.present(2)
+    assert "4618" in bus.absence_reason(2)
+
+
+def test_absent_servos_are_probed_in_turn():
+    bus, line = make_hot_bus({1: state_block()}, [1, 2, 3], presence_period=1)
+    bus.verify_servos()
+    line.written.clear()
+    bus.read_batch()
+    bus.read_batch()
+    probed = [p[2] for p in line.written if p[4] == fp.READ]
+    assert probed == [2, 3]
+
+
+def test_the_config_turns_hot_plug_on_for_a_feetech_bus(tmp_path):
+    from actuo.drivers.config import build_bus
+
+    path = tmp_path / "robot.yaml"
+    path.write_text(
+        "bus:\n"
+        "  transport: {plugin: serial, channel: /dev/null, bitrate: 1000000}\n"
+        "  hot_plug: true\n"
+        "  absent_after_misses: 5\n"
+        "joints:\n"
+        "  - name: j1\n"
+        "    actuator: {plugin: feetech_sts, id: 1, model: STS3215}\n"
+        "  - name: j3\n"
+        "    actuator: {plugin: feetech_sts, id: 3, model: HLS3950M}\n")
+    bus, names = build_bus(str(path))
+    assert isinstance(bus, FeetechBus) and names == ["j1", "j3"]
+    assert bus.hot_plug and bus.absent_after_misses == 5

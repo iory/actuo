@@ -58,7 +58,7 @@ commands are fenced and rate-limited). `examples/ri_with_emulator.py` runs a
 real robot config and URDF (an RCB-4mini humanoid) against the RCB-4mini
 emulator.
 
-On a bus whose servos may be missing (`hot_plug: true` on the RCB-4mini bus),
+On a bus whose servos may be missing (`hot_plug: true` on the RCB-4mini or FEETECH bus),
 the config can list more joints than are plugged in:
 
 ```python

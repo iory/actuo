@@ -31,7 +31,7 @@ joint's envelope and rate-limited.
 Servos that come and go
 -----------------------
 On a bus that reports presence and allows servos to be missing (``hot_plug``
-on the RCB-4mini bus), the config may list more joints than are plugged in. A
+on the RCB-4mini or FEETECH bus), the config may list more joints than are plugged in. A
 joint is **attached** once its servo has answered for
 :data:`ATTACH_CYCLES` cycles in a row; only then is its command seeded from
 the measured pose and may it be moved or switched on. The controller group

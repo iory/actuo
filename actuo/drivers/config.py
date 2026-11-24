@@ -878,12 +878,22 @@ def build_bus(
             transport, actuators,
             read_timeout=float(bus_spec.get("read_timeout", 0.05)))
     elif bus_plugin == "feetech_bus":
-        from actuo.drivers.buses.feetech_bus import FeetechBus
+        from actuo.drivers.buses.feetech_bus import (
+            DEFAULT_ABSENT_AFTER_MISSES as FEETECH_DEFAULT_ABSENT_AFTER_MISSES,
+            DEFAULT_PRESENCE_PERIOD as FEETECH_DEFAULT_PRESENCE_PERIOD,
+            DEFAULT_PROBE_TIMEOUT as FEETECH_DEFAULT_PROBE_TIMEOUT, FeetechBus)
         bus = FeetechBus(
             transport, actuators,
             read_timeout=float(bus_spec.get("read_timeout", 0.05)),
             use_sync_read=bool(bus_spec.get("use_sync_read", True)),
-            reset_torque_limit=bool(bus_spec.get("reset_torque_limit", True)))
+            reset_torque_limit=bool(bus_spec.get("reset_torque_limit", True)),
+            hot_plug=bool(bus_spec.get("hot_plug", False)),
+            absent_after_misses=int(bus_spec.get(
+                "absent_after_misses", FEETECH_DEFAULT_ABSENT_AFTER_MISSES)),
+            presence_period=int(bus_spec.get(
+                "presence_period", FEETECH_DEFAULT_PRESENCE_PERIOD)),
+            probe_timeout=float(bus_spec.get(
+                "probe_timeout", FEETECH_DEFAULT_PROBE_TIMEOUT)))
     elif bus_plugin == "dynamixel_bus":
         from actuo.drivers.buses.dynamixel_bus import DynamixelBus
         bus = DynamixelBus(
