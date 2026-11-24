@@ -1,6 +1,10 @@
 bus:
   transport: {plugin: serial, channel: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B91044152-if00, bitrate: 1000000}
   hot_plug: true
+urdf: drill.urdf
+modules:
+  arm: {joints: [shoulder_pitch, elbow_pitch]}
+  tool: {joints: [drill_spin]}
 joints:
   - {name: shoulder_pitch, actuator: {plugin: feetech_sts, id: 1, model: STS3215}}
   - {name: elbow_pitch, actuator: {plugin: feetech_sts, id: 2, model: STS3215, direction: -1, offset_deg: 10.0}}

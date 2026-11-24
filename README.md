@@ -169,6 +169,36 @@ editable, so the ROS layer always runs the actuo next to it. Another package
 whose venv needs the same actuo calls `actuo_requirement()` after
 `find_package(actuo_ros)` (see `ros/actuo_ros/cmake/actuo_ros-extras.cmake.in`).
 
+#### A modular robot under ROS 2: `modular.launch.py`
+
+```sh
+ros2 launch actuo_ros modular.launch.py catalog:=<catalog>.yaml
+ros2 service call /actuo_configuration/declare actuo_msgs/srv/DeclareConfiguration "{name: drill}"
+```
+
+One controller_manager holds every configuration of an `actuo.modular` catalog
+side by side (`actuo-modular-files`: each configuration's modules as
+components `<configuration>_<module>`, each on the servicer segment
+`<shm-name>_<configuration>`; joint names must differ between
+configurations). The servicer (`actuo_bus_node --real --catalog`) runs the
+current configuration and switches in-process -- its loop is left without
+releasing the servos the next configuration has, and those keep torque under
+their new names -- and publishes `/actuo_configuration/configuration`.
+`actuo_configuration_manager` follows it: the other configurations'
+controllers and components go inactive, `/robot_description` becomes the new
+configuration's model (RViz follows), and each module of the running
+configuration comes up -- component, then its joint_state_broadcaster and
+controllers -- as soon as all its servos answer, so a module plugged in later
+joins and one pulled out goes down alone. controller_manager takes the
+superset description on its own topic (`/actuo_modular/robot_description`).
+
+On `examples/rigs/feetech_4port/modular` (2026-11-24,
+`ros/actuo_ros/test/hardware/check_modular_launch.py`): after the servos
+changed, the servicer switched in 47 ms, ros2_control followed 80 ms later and
+the new modules were up 70 ms after that; a declaration had the modules up
+0.26 s after the service call; a module pulled within a configuration went
+down alone and was back 0.9 s after it was plugged in.
+
 `firmware/actuo_uart_relay/` is the Arduino UNO R4 WiFi sketch that relays an
 RCB-4mini's serial port over UDP for the `kondo_rcb4_udp` transport.
 

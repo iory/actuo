@@ -32,6 +32,7 @@ ament_uv_install_python_scripts(
     scripts/actuo_watch_pose.py
     scripts/actuo_teach_node.py
     scripts/actuo_calibrate.py
+    scripts/actuo_configuration_manager.py
   STRIP_PY_EXTENSION
 )
 

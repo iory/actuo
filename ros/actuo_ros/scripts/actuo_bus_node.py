@@ -789,7 +789,11 @@ def run_real(args):
         overrides[key] = yaml.safe_load(value)
 
     servo_node = None
-    bus, joint_names = build_bus(args.config, transport_overrides=overrides or None)
+    bus, joint_names = build_bus(args.config, transport_overrides=overrides or None,
+                                 bus_overrides=getattr(args, "bus_overrides", None))
+    # Set by run_modular: this run is one configuration of a catalog.
+    switching = getattr(args, "switching", None)
+    configuration_node = getattr(args, "configuration_node", None)
     # After build_bus: it imports the python-can transport if, and only if,
     # this config uses it.
     TransmitQueueFull = transmit_queue_full_type()
@@ -1241,7 +1245,8 @@ def run_real(args):
         air_commands = None
         if args.ros:
             from actuo_ros.servo_node import ServoNode
-            rclpy.init(args=args.ros_args)
+            if not rclpy.ok():           # run_modular keeps one context across runs
+                rclpy.init(args=args.ros_args)
             servo_node = ServoNode(supervisor, lambda: shm)
             _expose_move_time_parameter(servo_node, bus)
             print("[actuo_bus_node] servo action: <node>/servo/set, state: "
@@ -1422,6 +1427,31 @@ def run_real(args):
         addressed_everything = False
         last_solicit = 0.0
         last_on_key = None
+        if switching is not None:
+            # Servos the previous configuration left holding torque keep it:
+            # own their command slots with the measured pose (no component is
+            # attached to this new segment yet) and switch them on before the
+            # first write, which would release every joint that is not on.
+            hold = [n for n in switching.hold_joints(joint_names, bus.actuators)
+                    if states[joint_names.index(n)] is not None
+                    and states[joint_names.index(n)].position is not None]
+            held = []
+            if hold:
+                slots = [joint_names.index(n) for n in hold]
+                rows = np.full((len(slots), CMD_STRIDE), math.nan)
+                rows[:, 0] = [states[i].position for i in slots]
+                shm.write_command_slots(slots, rows)
+                ok, message = supervisor.enable(shm, hold)
+                print("[actuo_bus_node] configuration {}: holding {}: {}".format(
+                    switching.current, ", ".join(hold), message),
+                    file=sys.stdout if ok else sys.stderr, flush=True)
+                if ok:
+                    held = hold
+            switching.held_joints = held
+            if configuration_node is not None:
+                configuration_node.publish(force=True)
+        switch_request = None
+        switch_cycles = 0
         previous_cycle_start = None
         # When the board last said anything. Not "when we last read" -- a read
         # that times out every cycle looks identical to a healthy loop from the
@@ -1429,6 +1459,21 @@ def run_real(args):
         # that is switched off.
         silent_since = None
         while True:
+            if switching is not None:
+                if configuration_node is not None:
+                    configuration_node.spin_once()
+                if switch_request is None:
+                    switch_request = switching.poll(bus, supervisor, joint_names)
+                    if switch_request is not None:
+                        print("[actuo_bus_node] configuration {} -> {} (keeping torque "
+                              "on ids {})".format(switching.current, switch_request.target,
+                                                  sorted(switch_request.hold_ids) or "none"),
+                              flush=True)
+                else:
+                    # One cycle has carried the releases poll() asked for.
+                    switch_cycles += 1
+                    if switch_cycles >= 2:
+                        break
             cycle_start = time.monotonic()
             if previous_cycle_start is not None:
                 loop_metrics.observe_cycle_period(cycle_start - previous_cycle_start)
@@ -1979,6 +2024,8 @@ def run_real(args):
                 time.sleep(sleep)
             else:
                 next_t = time.time()
+        # Only a configuration switch leaves the loop: torque stays as it is.
+        return switch_request
     except KeyboardInterrupt:
         # The launch's shutdown arrives here as SIGINT, including when ANOTHER
         # bus of the same robot aborts mid-motion. Without a release, this bus
@@ -2042,11 +2089,57 @@ def run_real(args):
             servo_node.destroy()
             # The launch's SIGINT has usually shut the context down already;
             # raising here would skip closing the bus.
-            if rclpy.ok():
+            if rclpy.ok() and switching is None:
                 rclpy.shutdown()
         bus.transport.close()
         print("[actuo_bus_node] bus closed", flush=True)
     return 0
+
+
+def run_modular(args):
+    """Run a modular robot's configurations one after the other.
+
+    Each configuration is an ordinary :func:`run_real` on its own robot config
+    and its own segment (``<shm-name>_<configuration>``), with every other
+    configuration's ids watched. When :class:`actuo.modular.Switching` decides
+    on another configuration, :func:`run_real` leaves its loop without
+    releasing the servos the next one has, and the next one starts holding
+    them. One ROS context and one :class:`~actuo_ros.configuration_node.ConfigurationNode`
+    serve every run.
+    """
+    import copy
+
+    from actuo.modular import Catalog, SwitchRequest, Switching, shm_segment
+
+    catalog = Catalog(args.catalog)
+    current = args.configuration or catalog.default or catalog.names[0]
+    switching = Switching(catalog, current)
+    configuration_node = None
+    if args.ros:
+        import rclpy
+        from actuo_ros.configuration_node import ConfigurationNode
+        rclpy.init(args=args.ros_args)
+        configuration_node = ConfigurationNode(switching)
+    try:
+        while True:
+            config = catalog.configurations[switching.current]
+            run_args = copy.copy(args)
+            run_args.config = config.robot
+            run_args.shm_name = shm_segment(args.shm_name, config.name)
+            run_args.bus_overrides = {
+                "hot_plug": True,
+                "watch_ids": sorted(catalog.all_ids() - set(config.joint_ids.values()))}
+            run_args.switching = switching
+            run_args.configuration_node = configuration_node
+            result = run_real(run_args)
+            if not isinstance(result, SwitchRequest):
+                return result
+            switching.started(result)
+    finally:
+        if configuration_node is not None:
+            configuration_node.destroy()
+            if rclpy.ok():
+                rclpy.shutdown()
 
 
 def main(argv=None):
@@ -2059,6 +2152,12 @@ def main(argv=None):
                    help="drive a MuJoCo plant (requires --model)")
     p.add_argument("--real", action="store_true",
                    help="drive real hardware from --config")
+    p.add_argument("--catalog", default="",
+                   help="with --real: a modular robot's catalog (actuo.modular); "
+                        "each configuration gets the segment <shm-name>_<name>")
+    p.add_argument("--configuration", default="",
+                   help="with --catalog: the configuration to start in "
+                        "(default: the catalog's default)")
     p.add_argument("--config", default="",
                    help="robot bus YAML (required with --real)")
     p.add_argument("--mode", default="position",
@@ -2332,6 +2431,8 @@ def main(argv=None):
             return 2
         run_sim(args)
         return 0
+    if args.real and args.catalog:
+        return run_modular(args)
     if args.real:
         if not args.config:
             print("[actuo_bus_node] --real requires --config <robot>.yaml",

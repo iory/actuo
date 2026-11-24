@@ -1,6 +1,10 @@
 bus:
   transport: {plugin: serial, channel: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B91044152-if00, bitrate: 1000000}
   hot_plug: true
+urdf: gripper.urdf
+modules:
+  arm: {joints: [arm_shoulder, arm_elbow]}
+  hand: {gripper: [gripper_finger]}
 joints:
   - {name: arm_shoulder, actuator: {plugin: feetech_sts, id: 1, model: STS3215}}
   - {name: arm_elbow, actuator: {plugin: feetech_sts, id: 2, model: STS3215}}

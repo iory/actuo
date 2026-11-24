@@ -361,4 +361,269 @@ class ModularRobot:
         self.close()
 
 
-__all__ = ("Catalog", "Configuration", "ModularRobot", "ModularState")
+@dataclass(frozen=True)
+class SwitchRequest:
+    """Leave the current configuration for ``target``; ``hold_ids`` keep torque."""
+
+    target: str
+    hold_ids: FrozenSet[int]
+
+
+class Switching:
+    """Configuration switching for a process that owns the bus loop itself.
+
+    :class:`ModularRobot` runs :class:`~actuo.robot_interface.ActuoRobotInterface`
+    and switches between them; a bus servicer that runs its own loop uses this
+    instead: once per cycle it calls :meth:`poll`, and when that returns a
+    :class:`SwitchRequest` it services one more cycle (so the releases it asked
+    for reach the wire), leaves its loop without releasing anything else, and
+    starts the target configuration holding ``hold_ids``. The rules are
+    :class:`ModularRobot`'s (detect / declare, ``hold``).
+
+    Parameters
+    ----------
+    catalog : Catalog
+    current : str
+        The configuration running now.
+    """
+
+    def __init__(self, catalog: Catalog, current: str) -> None:
+        if current not in catalog.configurations:
+            raise KeyError(current)
+        self.catalog = catalog
+        self.current = current
+        self.select = catalog.select
+        self.problems: List[str] = []
+        self.answering: List[int] = []
+        #: Ids the starting configuration takes over with torque on.
+        self.hold_ids: FrozenSet[int] = frozenset()
+        #: Joints that kept torque across the last switch (set by the servicer).
+        self.held_joints: List[str] = []
+        self.last_switch_s: Optional[float] = None
+        self._requested: Optional[str] = None
+        self._lock = threading.Lock()
+        self._left_at: Optional[float] = None
+
+    def declare(self, name: str) -> Tuple[bool, str]:
+        """Ask for ``name`` and stop detecting. Thread-safe; acted on at the
+        next :meth:`poll`."""
+        if name not in self.catalog.configurations:
+            return False, "no configuration {!r}; have {}".format(
+                name, ", ".join(self.catalog.names))
+        with self._lock:
+            self.select = "declare"
+            self._requested = name
+        return True, ("already {}".format(name) if name == self.current
+                      else "switching to {}".format(name))
+
+    def resume_detection(self) -> None:
+        with self._lock:
+            self.select = "detect"
+            self._requested = None
+
+    def poll(self, bus, supervisor, joint_names: Sequence[str]) -> Optional[SwitchRequest]:
+        """Decide whether to leave the current configuration.
+
+        Releases (``supervisor.disable``) the enabled joints whose servos the
+        target does not have; the caller services one more cycle before
+        leaving so those releases reach the wire.
+        """
+        answering = set(bus.answering_ids())
+        self.answering = sorted(answering)
+        with self._lock:
+            requested, self._requested = self._requested, None
+            select = self.select
+        if requested is not None:
+            missing = sorted(self.catalog.configurations[requested].ids - answering)
+            self.problems = ([] if not missing else
+                             ["declared {} but ids {} do not answer".format(
+                                 requested, missing)])
+            target = requested
+        elif select == "detect":
+            target, self.problems = self.catalog.detect(answering)
+        else:
+            return None
+        if target is None or target == self.current:
+            return None
+        enabled = set(supervisor.enabled_joints)
+        id_of = {name: int(a.id) for name, a in zip(joint_names, bus.actuators)}
+        target_ids = set(self.catalog.configurations[target].joint_ids.values())
+        carry = ({id_of[n] for n in enabled} & target_ids
+                 if self.catalog.hold == "same_id" else set())
+        release = [n for n in joint_names if n in enabled and id_of[n] not in carry]
+        if release:
+            supervisor.disable(release)
+        self._left_at = time.monotonic()
+        return SwitchRequest(target=target, hold_ids=frozenset(carry))
+
+    def started(self, request: SwitchRequest) -> None:
+        """The target configuration's loop is about to run."""
+        self.current = request.target
+        self.hold_ids = request.hold_ids
+        if self._left_at is not None:
+            self.last_switch_s = time.monotonic() - self._left_at
+            self._left_at = None
+
+    def hold_joints(self, joint_names: Sequence[str], actuators) -> List[str]:
+        """Joints of the starting configuration whose servos keep torque."""
+        return [n for n, a in zip(joint_names, actuators) if int(a.id) in self.hold_ids]
+
+
+__all__ = ("Catalog", "Configuration", "ModularRobot", "ModularState", "component_name",
+           "ros2_control_files", "shm_segment",
+           "SwitchRequest", "Switching")
+
+
+# -- ros2_control files ---------------------------------------------------------
+
+def component_name(configuration: str, module: str) -> str:
+    """The ros2_control component of ``module`` in ``configuration``."""
+    return "{}_{}".format(configuration, module)
+
+
+def shm_segment(base: str, configuration: str) -> str:
+    """The shared-memory segment the servicer creates for ``configuration``."""
+    return "{}_{}".format(base, configuration)
+
+
+def ros2_control_files(catalog_path: str, out_dir: str, shm_base: str,
+                       hardware_plugin: str) -> Dict[str, object]:
+    """Write one controller_manager's files for every configuration at once.
+
+    controller_manager takes one robot description, once. So every
+    configuration's modules go into it side by side, as components named
+    ``<configuration>_<module>`` reading the segment the servicer creates for
+    that configuration (:func:`shm_segment`); a switch then only deactivates
+    one configuration's components and controllers and activates another's.
+    Each configuration's robot config needs ``urdf`` and ``modules``
+    (:mod:`actuo.drivers.robot_document`). Joint names must differ between
+    configurations -- ros2_control gives a joint to one component -- while
+    links of the same name are taken as the same link (the robot's base).
+
+    Writes ``robot.urdf`` (the superset, with the components),
+    ``controllers.yaml`` and, per configuration, ``<name>.urdf`` (its own model,
+    for robot_state_publisher), and returns the manifest the configuration
+    manager and the launch file read::
+
+        {"urdf": ..., "controllers_yaml": ..., "initial": <default>,
+         "configurations": {name: {"urdf": ..., "segment": ...,
+                                   "components": [...], "controllers": [...],
+                                   "modules": {component: {"joints": [...],
+                                                           "controllers": [...]}}}}}
+
+    Each module (component) has its own joint_state_broadcaster, first in its
+    ``controllers``.
+
+    Raises
+    ------
+    ValueError
+        A configuration has no urdf/modules, or two configurations name the
+        same joint or put one link under different parents.
+    """
+    import xml.etree.ElementTree as ET
+
+    from actuo.drivers.config import load_document
+    from actuo.drivers.robot_document import (
+        STATE_BROADCASTER, controller_parameters, controllers_of, hardware_urdf,
+        load_model, module_joints)
+
+    catalog = Catalog(catalog_path)
+    os.makedirs(out_dir, exist_ok=True)
+    superset = ET.Element("robot", name=os.path.splitext(os.path.basename(catalog_path))[0])
+    joint_owner: Dict[str, str] = {}
+    parent_of: Dict[str, str] = {}
+    present_links: Set[str] = set()
+    cm: Dict[str, object] = {}
+    params: Dict[str, object] = {}
+    manifest_configs: Dict[str, object] = {}
+    update_rate = 0
+    for name, config in catalog.configurations.items():
+        document = load_document(config.robot)
+        for key in ("urdf", "modules"):
+            if key not in document:
+                raise ValueError("{}: {} has no {!r}".format(catalog_path, config.robot, key))
+        model = load_model(document, config.robot)
+        own = os.path.join(out_dir, name + ".urdf")
+        with open(own, "w") as f:
+            f.write(model)
+        segment = shm_segment(shm_base, name)
+        tree = ET.fromstring(hardware_urdf(model, document, segment,
+                                           hardware_plugin=hardware_plugin))
+        components = []
+        for element in tree:
+            if element.tag == "link":
+                if element.get("name") in present_links:
+                    continue
+                present_links.add(element.get("name"))
+            elif element.tag == "joint":
+                joint = element.get("name")
+                if joint in joint_owner:
+                    raise ValueError(
+                        "{}: joint {} is in configurations {} and {}; ros2_control "
+                        "gives a joint to one component, so name it differently "
+                        "in each".format(catalog_path, joint, joint_owner[joint], name))
+                joint_owner[joint] = name
+                child = element.find("child").get("link")
+                parent = element.find("parent").get("link")
+                if parent_of.setdefault(child, parent) != parent:
+                    raise ValueError(
+                        "{}: link {} hangs from {} in one configuration and from "
+                        "{} in {}".format(catalog_path, child, parent_of[child], parent, name))
+            elif element.tag == "ros2_control":
+                element.set("name", component_name(name, element.get("name")))
+                components.append(element.get("name"))
+            elif element.get("name") is not None and any(
+                    e.tag == element.tag and e.get("name") == element.get("name")
+                    for e in superset):
+                continue
+            superset.append(element)
+        generated = controller_parameters(document)
+        ros_params = generated["controller_manager"]["ros__parameters"]
+        update_rate = max(update_rate, int(ros_params["update_rate"]))
+        # Per module, broadcaster included: a module whose servos are missing
+        # stays down without keeping the others from coming up (a broadcaster
+        # over the whole configuration would not activate without it).
+        modules = {}
+        owner = {c: spec["module"] for c, spec in controllers_of(document).items()}
+        for module, spec in module_joints(document).items():
+            component = component_name(name, module)
+            broadcaster = "{}_joint_state_broadcaster".format(component)
+            cm[broadcaster] = {"type": STATE_BROADCASTER}
+            params[broadcaster] = {"ros__parameters": {
+                "joints": spec["joints"] + spec["gripper"], "interfaces": ["position"]}}
+            controllers = [broadcaster]
+            for controller, of in owner.items():
+                if of != module:
+                    continue
+                renamed = "{}_{}".format(name, controller)
+                cm[renamed] = {"type": ros_params[controller]["type"]}
+                params[renamed] = generated[controller]
+                controllers.append(renamed)
+            modules[component] = {"joints": spec["joints"] + spec["gripper"],
+                                  "controllers": controllers}
+        manifest_configs[name] = {
+            "urdf": own, "segment": segment, "components": components,
+            "controllers": [c for m in modules.values() for c in m["controllers"]],
+            "modules": modules}
+    initial = catalog.default or catalog.names[0]
+    cm.update(
+        update_rate=update_rate,
+        hardware_components_initial_state={
+            "shutdown_on_initial_state_failure": False,
+            # Every component starts inactive: the configuration manager brings
+            # each module up once the servicer runs its configuration and all
+            # of its servos answer -- at start-up as after a switch.
+            "inactive": [c for spec in manifest_configs.values()
+                         for c in spec["components"]]})
+    controllers_yaml = os.path.join(out_dir, "controllers.yaml")
+    with open(controllers_yaml, "w") as f:
+        yaml.safe_dump({"controller_manager": {"ros__parameters": cm}, **params}, f,
+                       sort_keys=False)
+    urdf = os.path.join(out_dir, "robot.urdf")
+    with open(urdf, "w") as f:
+        f.write(ET.tostring(superset, encoding="unicode"))
+    manifest = {"urdf": urdf, "controllers_yaml": controllers_yaml, "initial": initial,
+                "configurations": manifest_configs}
+    with open(os.path.join(out_dir, "manifest.yaml"), "w") as f:
+        yaml.safe_dump(manifest, f, sort_keys=False)
+    return manifest

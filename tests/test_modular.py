@@ -74,3 +74,132 @@ def test_a_declared_signature_overrides_the_config_ids(tmp_path):
     c = Catalog(str(tmp_path / "catalog.yaml"))
     assert c.configurations["a"].ids == {1}
     assert (c.default, c.select, c.hold) == ("a", "declare", "none")
+
+
+# --- Switching (inside a bus servicer) -------------------------------------------
+
+class FakeBus:
+    def __init__(self, ids, answering):
+        self.actuators = [type("A", (), {"id": i})() for i in ids]
+        self._answering = answering
+
+    def answering_ids(self):
+        return sorted(self._answering)
+
+
+class FakeSupervisor:
+    def __init__(self, enabled):
+        self.enabled_joints = list(enabled)
+        self.disabled = []
+
+    def disable(self, joints):
+        self.disabled += list(joints)
+        self.enabled_joints = [j for j in self.enabled_joints if j not in joints]
+        return True, ""
+
+
+def gripper_drill(tmp_path, extra=""):
+    from actuo.modular import Switching
+    c = catalog(tmp_path, {"gripper": [1, 2, 3], "drill": [1, 2, 4]}, extra)
+    return Switching(c, "gripper")
+
+
+def test_detection_asks_to_leave_and_carries_the_shared_servos(tmp_path):
+    s = gripper_drill(tmp_path)
+    names = ["gripper_j1", "gripper_j2", "gripper_j3"]
+    sup = FakeSupervisor(["gripper_j1", "gripper_j3"])
+    assert s.poll(FakeBus([1, 2, 3], {1, 2, 3}), sup, names) is None
+    request = s.poll(FakeBus([1, 2, 3], {1, 2, 4}), sup, names)
+    assert request.target == "drill" and request.hold_ids == {1}
+    assert sup.disabled == ["gripper_j3"]          # id 3 is not in drill: released
+    s.started(request)
+    assert s.current == "drill"
+    assert s.hold_joints(["drill_j1", "drill_j2", "drill_j4"],
+                         FakeBus([1, 2, 4], set()).actuators) == ["drill_j1"]
+
+
+def test_a_declaration_wins_over_detection_until_resumed(tmp_path):
+    s = gripper_drill(tmp_path)
+    names = ["gripper_j1", "gripper_j2", "gripper_j3"]
+    ok, _ = s.declare("drill")
+    assert ok and s.select == "declare"
+    request = s.poll(FakeBus([1, 2, 3], {1, 2, 3}), FakeSupervisor([]), names)
+    assert request.target == "drill"
+    assert "do not answer" in s.problems[0]         # id 4 is not there: said, not refused
+    s.started(request)
+    assert s.poll(FakeBus([1, 2, 4], {1, 2, 3}), FakeSupervisor([]), names) is None
+    s.resume_detection()
+    assert s.poll(FakeBus([1, 2, 4], {1, 2, 3}), FakeSupervisor([]), names).target == "gripper"
+
+
+def test_an_unknown_declaration_is_refused(tmp_path):
+    s = gripper_drill(tmp_path)
+    ok, message = s.declare("hammer")
+    assert not ok and "hammer" in message and s.select == "detect"
+
+
+def test_hold_none_releases_everything(tmp_path):
+    s = gripper_drill(tmp_path, "hold: none\n")
+    sup = FakeSupervisor(["gripper_j1"])
+    request = s.poll(FakeBus([1, 2, 3], {1, 2, 4}), sup,
+                     ["gripper_j1", "gripper_j2", "gripper_j3"])
+    assert request.hold_ids == frozenset() and sup.disabled == ["gripper_j1"]
+
+
+# --- ros2_control files ----------------------------------------------------------
+
+def modular_robot(tmp_path, name, joints, base="base_link"):
+    links = "".join("<link name='{}_link'/>".format(j) for j in joints)
+    chain, parent = "", base
+    for j in joints:
+        chain += ("<joint name='{j}' type='revolute'><parent link='{p}'/><child link='{j}_link'/>"
+                  "<limit lower='-1' upper='1' effort='1' velocity='1'/></joint>").format(j=j, p=parent)
+        parent = j + "_link"
+    (tmp_path / (name + ".urdf")).write_text(
+        "<robot name='{}'><link name='{}'/>{}{}</robot>".format(name, base, links, chain))
+    actuators = "".join(
+        "  - {{name: {j}, actuator: {{plugin: feetech_sts, id: {i}, model: STS3215}}}}\n"
+        .format(j=j, i=i) for i, j in enumerate(joints, 1))
+    (tmp_path / (name + ".yaml")).write_text(
+        "bus: {{transport: {{plugin: serial, channel: /dev/null, bitrate: 1000000}}}}\n"
+        "urdf: {n}.urdf\nmodules:\n  arm: {{joints: [{js}]}}\njoints:\n{a}".format(
+            n=name, js=", ".join(joints), a=actuators))
+
+
+def test_every_configuration_goes_into_one_controller_manager(tmp_path):
+    import xml.etree.ElementTree as ET
+
+    import yaml as y
+
+    from actuo.modular import ros2_control_files
+
+    modular_robot(tmp_path, "gripper", ["g1", "g2"])
+    modular_robot(tmp_path, "drill", ["d1"])
+    (tmp_path / "catalog.yaml").write_text(
+        "configurations:\n  gripper: {robot: gripper.yaml, urdf: gripper.urdf}\n"
+        "  drill: {robot: drill.yaml, urdf: drill.urdf}\ndefault: gripper\n")
+    m = ros2_control_files(str(tmp_path / "catalog.yaml"), str(tmp_path / "out"),
+                           "mod", "pkg/Plugin")
+    root = ET.parse(m["urdf"]).getroot()
+    assert [l.get("name") for l in root.findall("link")].count("base_link") == 1
+    blocks = {b.get("name"): b for b in root.findall("ros2_control")}
+    assert sorted(blocks) == ["drill_arm", "gripper_arm"]
+    assert blocks["drill_arm"].find("hardware/param[@name='shm_name']").text == "mod_drill"
+    assert m["configurations"]["drill"]["controllers"] == [
+        "drill_arm_joint_state_broadcaster", "drill_arm_controller"]
+    assert m["configurations"]["drill"]["modules"]["drill_arm"]["joints"] == ["d1"]
+    params = y.safe_load(open(m["controllers_yaml"]))
+    cm = params["controller_manager"]["ros__parameters"]
+    assert cm["hardware_components_initial_state"]["inactive"] == ["gripper_arm", "drill_arm"]
+    assert params["drill_arm_joint_state_broadcaster"]["ros__parameters"]["joints"] == ["d1"]
+
+
+def test_one_joint_name_in_two_configurations_is_refused(tmp_path):
+    from actuo.modular import ros2_control_files
+
+    modular_robot(tmp_path, "a", ["j1"])
+    modular_robot(tmp_path, "b", ["j1"])
+    (tmp_path / "catalog.yaml").write_text(
+        "configurations:\n  a: {robot: a.yaml, urdf: a.urdf}\n  b: {robot: b.yaml, urdf: b.urdf}\n")
+    with pytest.raises(ValueError, match="name it differently"):
+        ros2_control_files(str(tmp_path / "catalog.yaml"), str(tmp_path / "out"), "m", "p/P")
