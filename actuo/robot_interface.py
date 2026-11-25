@@ -170,7 +170,7 @@ class ActuoRobotInterface(RobotInterfaceBase):
             raise ValueError("joints in the config but not in the model: {}"
                              .format(", ".join(missing)))
         #: Whether servos of this bus may be missing and come and go.
-        self.hot_plug = bool(getattr(self.bus, "hot_plug", False))
+        self.hot_plug = bool(self.bus.hot_plug)
         if required_joints is not None and not self.hot_plug:
             raise ValueError(
                 "required_joints needs a hot-plug bus (bus.hot_plug: true); "
@@ -241,9 +241,8 @@ class ActuoRobotInterface(RobotInterfaceBase):
 
     def _answers(self, index: int, state) -> bool:
         """Whether the servo of bus joint ``index`` is answering now."""
-        present = getattr(self.bus, "present", None)
-        if self.hot_plug and callable(present):
-            return bool(present(self.bus.actuators[index].id))
+        if self.hot_plug:
+            return bool(self.bus.present(self.bus.actuators[index].id))
         return state is not None and state.position is not None
 
     def _read(self, timeout: float) -> None:
@@ -318,11 +317,9 @@ class ActuoRobotInterface(RobotInterfaceBase):
                         ", ".join(silent), timeout, self._why_absent(silent)))
 
     def _why_absent(self, names: Sequence[str]) -> str:
-        reason = getattr(self.bus, "absence_reason", None)
-        if not callable(reason):
-            return ""
-        reasons = ["{}: {}".format(n, reason(self.bus.actuators[self._index[n]].id))
-                   for n in names]
+        reasons = ["{}: {}".format(
+            n, self.bus.absence_reason(self.bus.actuators[self._index[n]].id))
+            for n in names]
         return " -- " + "; ".join(r for r in reasons if not r.endswith(": "))
 
     # ------------------------------------------------------------ attachment

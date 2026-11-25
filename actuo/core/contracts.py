@@ -525,6 +525,62 @@ class Bus(abc.ABC):
         implementations and no contract is not a contract.
         """
 
+    # --- presence -------------------------------------------------------------
+    #
+    # Which servos answer, as one contract for every bus. The layers above
+    # (the robot interface attaching and detaching joints, the servo
+    # supervisor refusing to enable a silent one, actuo.modular telling robots
+    # apart by the servos that answer) are bus-agnostic and ask only this.
+    # It used to live in two buses and be looked up with getattr, so a robot
+    # on any other bus was simply "not hot-pluggable" without anyone saying
+    # so -- the same shape as last_state's history above.
+
+    #: The bus can take servos away while running and back when they answer
+    #: (``hot_plug``). A bus that cannot leaves this False and refuses
+    #: ``hot_plug=True`` (see :func:`require_presence`).
+    supports_hot_plug = False
+    #: The bus can tell whether ids that are not its servos answer
+    #: (:meth:`watch`, :meth:`answering_ids`).
+    supports_watch = False
+    #: Servos may be missing at start and may come and go. Set by buses that
+    #: support it, from their configuration.
+    hot_plug = False
+
+    def present(self, device_id: DeviceId) -> bool:
+        """Whether one of this bus's servos is answering.
+
+        The default is for a bus that never takes a servo away: whether it
+        has ever reported. A ``hot_plug`` bus overrides it.
+        """
+        return self.last_state(device_id) is not None
+
+    def absence_reason(self, device_id: DeviceId) -> str:
+        """Why :meth:`present` is False for ``device_id``; '' when it is True."""
+        return "" if self.present(device_id) else "has not reported"
+
+    @property
+    def watch_ids(self) -> Tuple[DeviceId, ...]:
+        """Ids watched with :meth:`watch` (never this bus's own servos)."""
+        return ()
+
+    def watch(self, ids: Sequence[DeviceId]) -> None:
+        """Also find out whether ``ids``, which are not this bus's servos, answer.
+
+        They are never written. :meth:`answering_ids` reports them. Ids of
+        this bus's own servos are ignored. A bus that cannot see them raises
+        :class:`CapabilityError` rather than reporting them silent forever.
+        """
+        own = {a.id for a in self.actuators}
+        if any(i not in own for i in ids):
+            raise CapabilityError(
+                "{} cannot tell whether ids outside its own servos answer "
+                "(watch {})".format(type(self).__name__,
+                                    sorted(str(i) for i in ids if i not in own)))
+
+    def answering_ids(self) -> List[DeviceId]:
+        """Every id known to answer now: present servos and watched ids."""
+        return sorted(a.id for a in self.actuators if self.present(a.id))
+
     def diagnose(self) -> List[DiagItem]:
         """Backend-specific health details.
 
@@ -534,6 +590,25 @@ class Bus(abc.ABC):
         them per backend would duplicate and drift.
         """
         return []
+
+
+def require_presence(bus_class: type, hot_plug: bool, watch_ids: Sequence) -> None:
+    """Refuse ``hot_plug`` / ``watch_ids`` a bus class cannot do, before building it.
+
+    Raises
+    ------
+    CapabilityError
+        ``hot_plug`` on a bus without ``supports_hot_plug``, or ``watch_ids``
+        on one without ``supports_watch``. Ignoring either would leave a robot
+        that looks configured for modules coming and going and is not.
+    """
+    if hot_plug and not bus_class.supports_hot_plug:
+        raise CapabilityError(
+            "{} cannot take servos away and back (hot_plug)".format(bus_class.__name__))
+    if watch_ids and not bus_class.supports_watch:
+        raise CapabilityError(
+            "{} cannot tell whether ids outside its own servos answer "
+            "(watch_ids {})".format(bus_class.__name__, list(watch_ids)))
 
 
 @dataclass

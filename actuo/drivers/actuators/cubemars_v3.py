@@ -290,9 +290,15 @@ class CubeMarsV3Actuator(CubeMarsActuator):
         command back and decode it as state -- byte 0, the kp high byte, read
         as the position high byte.
         """
-        if not super().matches(frame):
-            return False
-        return (int(frame.address) >> 8) != FORCE_CONTROL_PACKET
+        return super().matches(frame)
+
+    def status_source(self, frame: Frame) -> Optional[int]:
+        """As the servo model's, except that packet 8 is a command (see
+        :meth:`matches`)."""
+        source = super().status_source(frame)
+        if source is None or (int(frame.address) >> 8) == FORCE_CONTROL_PACKET:
+            return None
+        return source
 
     def encode_mode(self, mode: OperatingMode) -> List[Frame]:
         """Nothing to arm: the control mode rides in each command's id.

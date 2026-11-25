@@ -13,6 +13,7 @@ from actuo.core.contracts import ActuatorState, Capabilities, OperatingMode
 from actuo.drivers.free_drive import (FreeDrive, FreeDriveConfig, FreeDriveJoint,
                                       free_drive_config)
 from actuo.drivers.servo import ServoSupervisor
+from actuo.core.contracts import Bus as _ContractBus
 
 STRIDE = 3
 NAMES = ["joint0", "joint1"]
@@ -132,6 +133,11 @@ class Actuator:
 
 
 class Bus:
+    # The presence contract, as actuo.core.contracts.Bus defines it for a bus
+    # that never takes a servo away.
+    hot_plug = False
+    present = _ContractBus.present
+    absence_reason = _ContractBus.absence_reason
     def __init__(self, positions, modes):
         self.actuators = [Actuator(10 + i, modes) for i in range(len(positions))]
         self.states = {a.id: ActuatorState(position=p, error=0)

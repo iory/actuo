@@ -15,6 +15,18 @@ request/response round trips, and on a 1 Mbit/s line that is the dominant term
 in the cycle time. This bus does the N reads (there is no alternative) but
 reports the cost through :attr:`reads_per_cycle` so a slow loop is explained by
 a number rather than by guesswork.
+
+Servos that come and go (``hot_plug``) and watched ids
+------------------------------------------------------
+The same rules as the FEETECH bus (:mod:`actuo.drivers.buses.presence`): a
+servo is present once it has answered with the model number its config names,
+absent after ``absent_after_misses`` reads in a row without a reply, and while
+absent it is left out of the cycle read and asked, in turn with the watched
+ids, every ``presence_period`` reads (protocol 2.0: PING, which answers with
+the model number; 1.0: a READ of the model number at address 0). One that
+comes back with another model number stays absent, and the reason says so.
+An absent servo is sent torque off only, so it comes back limp, and its
+profile velocity is written again before it next holds.
 """
 
 from __future__ import annotations
@@ -27,6 +39,11 @@ from actuo.core.contracts import (
 from actuo.core.diagnostics import DiagItem, DiagLevel
 
 from actuo.drivers import dynamixel_protocol as dxl
+from actuo.drivers.buses.presence import (
+    ABSENT, DEFAULT_ABSENT_AFTER_MISSES, DEFAULT_PRESENCE_PERIOD, PresenceTracker)
+
+#: Address of the model number in every DYNAMIXEL control table (2 bytes).
+MODEL_NUMBER_ADDRESS = 0
 
 
 class DynamixelBus(Bus):
@@ -51,6 +68,17 @@ class DynamixelBus(Bus):
     silence_error_age_s : float
         Seconds since the last reply after which an already-seen servo is
         reported as ERROR rather than WARN. Default 1.0 s.
+    hot_plug : bool
+        Servos may be absent at start and may come and go (see the module
+        docstring).
+    absent_after_misses, presence_period : int
+        With ``hot_plug``: reads in a row without a reply that make a servo
+        absent; reads between two probes.
+    probe_timeout : float
+        Seconds a probe waits for its reply.
+    watch_ids : sequence of int
+        Ids that are not this bus's servos but whose presence is wanted
+        (:meth:`watch`). They are only ever probed.
 
     Notes
     -----
@@ -59,11 +87,25 @@ class DynamixelBus(Bus):
     dropped packet from sustained communication loss.
     """
 
+    supports_hot_plug = True
+    supports_watch = True
+
     def __init__(self, transport, actuators, read_timeout: float = 0.05,
                  use_sync_read: bool = True,
                  silence_error_misses: int = 10,
-                 silence_error_age_s: float = 1.0) -> None:
+                 silence_error_age_s: float = 1.0,
+                 hot_plug: bool = False,
+                 absent_after_misses: int = DEFAULT_ABSENT_AFTER_MISSES,
+                 presence_period: int = DEFAULT_PRESENCE_PERIOD,
+                 probe_timeout: float = 0.01,
+                 watch_ids: Sequence[int] = ()) -> None:
         super().__init__(transport, actuators)
+        self.hot_plug = bool(hot_plug)
+        self.probe_timeout = float(probe_timeout)
+        self.presence = PresenceTracker(
+            [int(a.id) for a in self.actuators], hot_plug=self.hot_plug,
+            absent_after_misses=absent_after_misses, presence_period=presence_period,
+            watch_ids=[int(i) for i in watch_ids])
         self.read_timeout = float(read_timeout)
         self.use_sync_read = bool(use_sync_read)
         self.silence_error_misses = int(max(1, silence_error_misses))
@@ -72,7 +114,6 @@ class DynamixelBus(Bus):
         self._missed = 0
         self._mode = OperatingMode.POSITION
         self._comm_failures: Dict[int, int] = {}
-        self._consecutive_misses: Dict[int, int] = {}
         self._last_rx: Dict[int, float] = {}
         self._joint_name_by_id: Dict[int, str] = {}
         #: Servo ids believed to have torque_enable = 1. Used only to decide
@@ -106,6 +147,80 @@ class DynamixelBus(Bus):
 
     def last_state(self, actuator_id: int) -> Optional[ActuatorState]:
         return self._states.get(actuator_id)
+
+    # --- presence ------------------------------------------------------------
+    @property
+    def watch_ids(self) -> Tuple[int, ...]:
+        return self.presence.watch_ids
+
+    def watch(self, ids: Sequence[int]) -> None:
+        """Probe ``ids`` in the presence rotation from now on."""
+        self.presence.set_watch_ids(int(i) for i in ids)
+
+    def present(self, actuator_id: int) -> bool:
+        """Whether a servo is answering (with ``hot_plug``: answered with its
+        model number and has not missed ``absent_after_misses`` reads since;
+        without it: has ever reported)."""
+        return self.presence.present(int(actuator_id))
+
+    def absence_reason(self, actuator_id: int) -> str:
+        return self.presence.absence_reason(int(actuator_id))
+
+    def answering_ids(self) -> List[int]:
+        return self.presence.answering_ids()
+
+    def _model_number(self, servo_id: int) -> Optional[int]:
+        """The model number ``servo_id`` answers with; ``None`` if silent."""
+        if self.protocol == dxl.PROTOCOL_2:
+            reply = self.transport.transact(
+                [Frame(payload=dxl.build_ping(self.protocol, servo_id),
+                       address=servo_id)], self.probe_timeout)[0]
+            parsed = (None if reply is None
+                      else dxl.parse_ping_status(self.protocol, reply.payload))
+            return None if parsed is None or parsed[0] != servo_id else parsed[1]
+        reply = self.transport.transact(
+            [Frame(payload=dxl.build_read(self.protocol, servo_id,
+                                          MODEL_NUMBER_ADDRESS, 2),
+                   address=servo_id)], self.probe_timeout)[0]
+        parsed = None if reply is None else dxl.parse_status(self.protocol, reply.payload)
+        if parsed is None or parsed[0] != servo_id or len(parsed[2]) < 2:
+            return None
+        return parsed[2][0] | (parsed[2][1] << 8)
+
+    def _check_back(self, actuator) -> None:
+        """Probe one servo that is not present; take it back if it is its model."""
+        number = self._model_number(actuator.id)
+        if number is None:
+            return
+        if number != actuator.model.number:
+            self.presence.mark_absent(actuator.id, (
+                "answers as model number {}, the config names {} ({})".format(
+                    number, actuator.model.number, actuator.model.name)))
+            return
+        self._torque_on.discard(actuator.id)    # back limp: profile again first
+        self.presence.mark_present(actuator.id)
+
+    def verify_servos(self, allow_missing: bool = False) -> List[DiagItem]:
+        """With ``hot_plug``: find which servos answer, with their model number.
+
+        A servo that does not answer, or answers as another model, starts
+        absent (a WARN / ERROR item). Without ``hot_plug`` this checks
+        nothing and returns no items: such a bus takes every servo as there.
+        """
+        if not self.hot_plug:
+            return []
+        items: List[DiagItem] = []
+        for actuator in self.actuators:
+            self._check_back(actuator)
+            if self.present(actuator.id):
+                continue
+            reason = self.absence_reason(actuator.id)
+            items.append(DiagItem(
+                name="servo/{}".format(self._joint_name(actuator.id)),
+                level=(DiagLevel.WARN if reason == "never answered" else DiagLevel.ERROR),
+                message=("not answering" if reason == "never answered" else reason),
+                values={"id": str(actuator.id)}))
+        return items
 
     def set_joint_names(self, joint_names: Sequence[str]) -> None:
         """Name each configured id for operator-facing diagnostics."""
@@ -229,7 +344,8 @@ class DynamixelBus(Bus):
         releases: List[Frame] = []
         held: List = []
         for actuator, command in zip(self.actuators, commands):
-            if command is None:
+            if command is None or (self.hot_plug and not self.present(actuator.id)):
+                # An absent servo gets torque off only, so it comes back limp.
                 releases.append(actuator.encode_release())
                 self._torque_on.discard(actuator.id)
                 continue
@@ -266,29 +382,37 @@ class DynamixelBus(Bus):
         the single most dangerous value this driver could emit.
         """
         wait = self.read_timeout if timeout is None else float(timeout)
+        asked = set(self.presence.polled(a.id for a in self.actuators))
+        polled = [a for a in self.actuators if a.id in asked]
         if self.protocol == dxl.PROTOCOL_2 and self.use_sync_read:
-            fresh = self._sync_read(wait)
+            fresh = self._sync_read(polled, wait)
         else:
-            fresh = self._individual_reads(wait)
+            fresh = self._individual_reads(polled, wait)
 
         self._diagnose_hardware_faults(fresh, wait)
 
         states: List[ActuatorState] = []
         for actuator in self.actuators:
             state = fresh.get(actuator.id)
-            if state is None:
+            if state is None and actuator.id in asked:
                 self._missed += 1
                 self._comm_failures[actuator.id] = (
                     int(self._comm_failures.get(actuator.id, 0)) + 1
                 )
-                self._consecutive_misses[actuator.id] = (
-                    int(self._consecutive_misses.get(actuator.id, 0)) + 1
-                )
-            else:
+                self.presence.missed(actuator.id)
+            elif state is not None:
                 self._states[actuator.id] = state
                 self._last_rx[actuator.id] = time.monotonic()
-                self._consecutive_misses[actuator.id] = 0
+                self.presence.answered(actuator.id)
             states.append(self._states.get(actuator.id))
+        probe = self.presence.next_probe()
+        if probe is not None:
+            kind, servo_id = probe
+            if kind == ABSENT:
+                self._check_back(next(a for a in self.actuators if a.id == servo_id))
+            else:
+                self.presence.watched_answered(
+                    servo_id, self._model_number(servo_id) is not None)
         return states
 
     def diagnose(self) -> List[DiagItem]:
@@ -314,7 +438,7 @@ class DynamixelBus(Bus):
             actuator_id = int(actuator.id)
             state = self._states.get(actuator_id)
             failures = int(self._comm_failures.get(actuator_id, 0))
-            streak = int(self._consecutive_misses.get(actuator_id, 0))
+            streak = int(self.presence.consecutive_misses(actuator_id))
             age = (None if actuator_id not in self._last_rx
                    else now - self._last_rx[actuator_id])
             values = {
@@ -330,7 +454,11 @@ class DynamixelBus(Bus):
 
             level = DiagLevel.OK
             message_parts: List[str] = []
-            if state is None:
+            if self.hot_plug and not self.present(actuator_id):
+                level = DiagLevel.WARN
+                message_parts.append("Not present: {}.".format(
+                    self.absence_reason(actuator_id)))
+            elif state is None:
                 level = DiagLevel.STALE
                 message_parts.append(
                     "No status packet has been received from this servo yet."
@@ -421,19 +549,21 @@ class DynamixelBus(Bus):
             state.aux["packet_error"] = float(state.error)
             state.error = byte
 
-    def _individual_reads(self, timeout: float) -> Dict[int, ActuatorState]:
+    def _individual_reads(self, actuators, timeout: float) -> Dict[int, ActuatorState]:
         queries: List[Frame] = []
-        for actuator in self.actuators:
+        for actuator in actuators:
             queries.extend(actuator.encode_query())
+        if not queries:
+            return {}
         replies = self.transport.transact(queries, timeout)
 
         fresh: Dict[int, ActuatorState] = {}
-        for actuator, reply in zip(self.actuators, replies):
+        for actuator, reply in zip(actuators, replies):
             if reply is not None and actuator.matches(reply):
                 fresh[actuator.id] = actuator.decode_state(reply)
         return fresh
 
-    def _sync_read(self, timeout: float) -> Dict[int, ActuatorState]:
+    def _sync_read(self, actuators, timeout: float) -> Dict[int, ActuatorState]:
         """One SYNC_READ per block group, then collect the status burst.
 
         The replies arrive as N separate status packets in id order, but this
@@ -442,7 +572,7 @@ class DynamixelBus(Bus):
         state after it -- which would move the wrong joints.
         """
         groups: Dict[Tuple[int, int], List] = {}
-        for actuator in self.actuators:
+        for actuator in actuators:
             table = actuator.model.table
             groups.setdefault((table.block_address, table.block_length),
                               []).append(actuator)
