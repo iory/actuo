@@ -1,0 +1,20 @@
+# KRS servos with ICS IDs 1-4 on the RCB-4mini's SIO5-8 side, ID N on PORT N:
+# the board numbers them 2 x ID + 1 (ICS numbers 3, 5, 7, 9). COM and ICS at
+# 1.25 Mbit/s, the board's ROM setting (2026-11-25).
+bus:
+  plugin: kondo_rcb4_bus
+  transport:
+    plugin: kondo_rcb4
+    channel: /dev/serial/by-id/usb-Kondo_Kagaku_DUAL_USB_ADAPTER_HS_KOUSBCNV-if00-port0
+    bitrate: 1250000
+  ics_bitrate: 1250000
+  hot_plug: true
+joints:
+  - name: j1
+    actuator: {plugin: kondo_ics, id: 3}
+  - name: j2
+    actuator: {plugin: kondo_ics, id: 5}
+  - name: j3
+    actuator: {plugin: kondo_ics, id: 7}
+  - name: j4
+    actuator: {plugin: kondo_ics, id: 9}

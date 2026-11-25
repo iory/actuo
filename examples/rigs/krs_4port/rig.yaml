@@ -1,0 +1,14 @@
+# Four Kondo KRS servos, each on its own port of a servo-fault-injector board
+# (iory/servo-fault-injector, the 2.54 mm headers), driven by an RCB-4mini
+# on the board's CTRL header. Same joints, model and robot_modes descriptions
+# as the FEETECH rig. Run the hardware tests against it with:
+#   ACTUO_RIG=examples/rigs/krs_4port/rig.yaml python -m pytest tests/hardware -v
+robot: robot.yaml
+urdf: ../feetech_4port/robot.urdf
+modes: [../feetech_4port/tool_change.yaml, ../feetech_4port/reconfigurable.yaml]
+injector:
+  plugin: servo_fault_injector
+  unplug_by: power        # PORT 4's signal switch does not open on the first v0.1 board
+targets: {j1: 1, j2: 2, j3: 3, j4: 4}
+# The board's firmware reads FEETECH packets only, so it cannot cut ICS replies.
+drop_joints: []
