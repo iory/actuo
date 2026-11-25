@@ -12,3 +12,4 @@ injector:
 targets: {j1: 1, j2: 2, j3: 3, j4: 4}
 # The board's firmware reads FEETECH packets only, so it cannot cut ICS replies.
 drop_joints: []
+modular: modular/catalog.yaml   # actuo.modular configurations (tests/hardware/test_modular_hw.py)

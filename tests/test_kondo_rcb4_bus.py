@@ -359,16 +359,46 @@ def test_a_released_servo_is_switched_on_before_its_first_target():
     board, bus = started({2: 9000, 5: 7000}, move_time_ms=None)
     command = ActuatorCommand(mode=OperatingMode.POSITION, position=0.0)
 
+    bus.read_batch()
+    board.sent.clear()
     bus.write_batch([command, None])
     bus.write_batch([command, None])
 
-    # First call: servo ON where it stands, then the target. Second call: the
-    # target only, since the servo is already on.
+    # First call: the reference written where it stands (its last reading),
+    # then the target. Second call: the target only, since it is on.
     assert len(board.sent) == 3
-    first = struct.unpack("<2H", board.sent[0][7:11])
-    assert first == (SERVO_ON_PULSE, SERVO_OFF_PULSE)
+    assert board.sent[0][:2] == bytes([protocol.OP_MOVE, protocol.SUB_COM_TO_RAM])
+    assert reference_of(board, 2) == 9000
     for packet in board.sent[1:]:
         assert struct.unpack("<2H", packet[7:11]) == (CENTER_PULSE, SERVO_OFF_PULSE)
+    assert not any(SERVO_ON_PULSE in struct.unpack("<2H", p[7:11])
+                   for p in board.sent if p[0] == OP_MULTI_SERVO_SINGLE_VELOCITY)
+
+
+def test_switching_on_never_copies_a_pulse_the_presence_check_cleared():
+    # SERVO_ON_PULSE makes the board copy the record's measured pulse into the
+    # reference; the presence check zeroes that field until the board rewrites
+    # it, and a servo switched on in between drove to its end stop.
+    board, bus = started({2: 9000, 5: 7000}, move_time_ms=None, hot_plug=True,
+                         presence_period=1)
+    bus.read_batch()
+    board._put(protocol.servo_record_address(2) + 4, b"\x00\x00")
+    board.sent.clear()
+
+    bus.write_batch([ActuatorCommand(mode=OperatingMode.POSITION, position=0.0), None])
+
+    assert reference_of(board, 2) == 9000
+
+
+def test_a_servo_resting_beyond_its_envelope_is_switched_on_at_its_target():
+    # Its reading is no pulse it can be commanded to (a KRS read 12001 and
+    # stopped answering when that was copied into its reference).
+    board, bus = started({2: 12001, 5: 7000}, move_time_ms=None)
+    bus.read_batch()
+
+    bus.write_batch([ActuatorCommand(mode=OperatingMode.POSITION, position=0.0), None])
+
+    assert reference_of(board, 2) == CENTER_PULSE
 
 
 def test_a_servo_released_again_is_switched_on_again():
@@ -380,8 +410,11 @@ def test_a_servo_released_again_is_switched_on_again():
     board.sent.clear()
     bus.write_batch([command, command])
 
+    # Servo 2 is switched on again: its reference written, then the batch.
     assert len(board.sent) == 2
-    assert struct.unpack("<2H", board.sent[0][7:11]) == (SERVO_ON_PULSE, CENTER_PULSE)
+    assert board.sent[0][:2] == bytes([protocol.OP_MOVE, protocol.SUB_COM_TO_RAM])
+    assert reference_of(board, 2) == CENTER_PULSE
+    assert struct.unpack("<2H", board.sent[1][7:11]) == (CENTER_PULSE, CENTER_PULSE)
 
 
 def test_different_move_bytes_are_refused_not_sent():
@@ -443,24 +476,37 @@ def test_a_wheel_is_switched_on_at_stop_not_at_its_pot_reading():
 
     # SERVO_ON_PULSE would copy the pot (11000, i.e. a fast speed) into the
     # wheel's reference. The wheel's reference is written to stop instead,
-    # and only the joint gets SERVO_ON_PULSE.
+    # the joint's to its target (it has not been read).
     assert reference_of(board, 5) == CENTER_PULSE
+    assert reference_of(board, 2) == CENTER_PULSE
     on_packets = [struct.unpack("<2H", packet[7:11]) for packet in board.sent
                   if packet[0] == OP_MULTI_SERVO_SINGLE_VELOCITY]
-    assert on_packets[0] == (SERVO_ON_PULSE, CENTER_PULSE)
-    assert on_packets[-1] == (CENTER_PULSE, CENTER_PULSE)
-    assert all(pulses[1] != SERVO_ON_PULSE for pulses in on_packets)
+    assert on_packets == [(CENTER_PULSE, CENTER_PULSE)]
     assert bus.servo_on_states() == {2: True, 5: True}
 
 
 def test_hold_all_holds_a_wheel_at_stop():
     board, bus = started_with_wheel()
+    bus.read_batch()
 
     bus.hold_all()
 
+    # The joint holds at its last reading, the wheel at stop.
     assert reference_of(board, 5) == CENTER_PULSE
+    assert reference_of(board, 2) == 9000
     packet = [p for p in board.sent if p[0] == OP_MULTI_SERVO_SINGLE_VELOCITY][-1]
-    assert struct.unpack("<2H", packet[7:11]) == (SERVO_ON_PULSE, CENTER_PULSE)
+    assert struct.unpack("<2H", packet[7:11]) == (9000, CENTER_PULSE)
+    assert bus.servo_on_states() == {2: True, 5: True}
+
+
+def test_hold_all_leaves_a_servo_it_has_not_read_off():
+    board, bus = started({2: 9000, 5: 7000})
+
+    bus.hold_all()
+
+    packet = [p for p in board.sent if p[0] == OP_MULTI_SERVO_SINGLE_VELOCITY][-1]
+    assert struct.unpack("<2H", packet[7:11]) == (SERVO_OFF_PULSE, SERVO_OFF_PULSE)
+    assert bus.servo_on_states() == {2: False, 5: False}
 
 
 def test_supply_voltage_is_reported_with_its_threshold():
@@ -759,8 +805,8 @@ def test_a_servo_moved_to_the_other_port_is_followed_and_comes_back_limp():
     board.sent.clear()
     bus.write_batch([HOLD, HOLD])
     # Switched on where it stands on its new number before any target.
-    assert struct.unpack("<4H", board.sent[0][7:15]) == (
-        CENTER_PULSE, SERVO_OFF_PULSE, SERVO_OFF_PULSE, SERVO_ON_PULSE)
+    assert board.sent[0][:2] == bytes([protocol.OP_MOVE, protocol.SUB_COM_TO_RAM])
+    assert reference_of(board, 5) == 7000
     ports = [i for i in bus.diagnose() if i.name == "bus/ics_ports"][0]
     assert "1 moved" in ports.message
 

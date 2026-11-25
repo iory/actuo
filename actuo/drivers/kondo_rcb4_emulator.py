@@ -22,7 +22,9 @@ The board RAM and the replies are those of ``FakeRcb4`` in
 What it adds, because the tests never needed it: the servos MOVE. A target in
 a batch move is reached linearly over the packet's move byte times the
 output cycle (15 ms flat), as the board interpolates; ``SERVO_OFF_PULSE``
-leaves the servo where it is and limp; ``SERVO_ON_PULSE`` holds it there.
+leaves the servo where it is and limp; ``SERVO_ON_PULSE`` holds it there. A
+RAM write of a record's reference (``+6``) puts the servo there at once and
+switches it on (OFF releases it), as the board does.
 
 What it does NOT model, so a pass here says nothing about these
 ---------------------------------------------------------------
@@ -164,6 +166,22 @@ class Rcb4Emulator:
             self._motion[slot] = (now_pulse, int(pulse), self._clock(),
                                   move_byte * FRAME_S)
 
+    def _reference_written(self, address: int, size: int) -> None:
+        """A RAM write that covers a record's reference (``+6``) drives the
+        servo there at once, as on the board; OFF releases it."""
+        for slot in self._motion:
+            reference = protocol.servo_record_address(slot) + 6
+            if not (address <= reference and reference + 2 <= address + size):
+                continue
+            pulse = self._word(reference)
+            now_pulse = self.pulse(slot)
+            if pulse == SERVO_OFF_PULSE:
+                self.enabled[slot] = False
+                self._motion[slot] = (now_pulse, now_pulse, self._clock(), 0.0)
+            else:
+                self.enabled[slot] = True
+                self._motion[slot] = (pulse, pulse, self._clock(), 0.0)
+
     def _ics_cycle(self) -> None:
         """What the board's servo loop leaves in RAM between host packets."""
         ics_code = ((self._word(protocol.CONFIG_ADDRESS)
@@ -197,6 +215,7 @@ class Rcb4Emulator:
         if body[:2] == bytes([protocol.OP_MOVE, protocol.SUB_COM_TO_RAM]):
             address = body[2] | body[3] << 8
             self._put(address, body[5:])
+            self._reference_written(address, len(body) - 5)
             return bytes([0x00, protocol.ACK_BYTE])
         if body[0] == OP_MULTI_SERVO_SINGLE_VELOCITY:
             bitmap = int.from_bytes(body[1:1 + SERVO_ID_BITMAP_BYTES], "little")

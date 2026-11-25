@@ -1,0 +1,9 @@
+# The FEETECH rig's two robots on KRS servos: ICS numbers 3 and 5 are in both,
+# under other joint names and calibration; 7 (a gripper) or 9 (a drill) says
+# which. Same models as examples/rigs/feetech_4port/modular.
+configurations:
+  gripper: {robot: gripper.yaml, urdf: ../../feetech_4port/modular/gripper.urdf}
+  drill: {robot: drill.yaml, urdf: ../../feetech_4port/modular/drill.urdf}
+default: gripper
+select: detect
+hold: same_id

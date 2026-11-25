@@ -1,0 +1,18 @@
+# ICS IDs 1-4 on the RCB-4mini's SIO5-8 side: ICS numbers 3, 5, 7, 9
+# (see ../robot.yaml).
+bus:
+  plugin: kondo_rcb4_bus
+  transport:
+    plugin: kondo_rcb4
+    channel: /dev/serial/by-id/usb-Kondo_Kagaku_DUAL_USB_ADAPTER_HS_KOUSBCNV-if00-port0
+    bitrate: 1250000
+  ics_bitrate: 1250000
+  hot_plug: true
+urdf: ../../feetech_4port/modular/drill.urdf
+modules:
+  arm: {joints: [shoulder_pitch, elbow_pitch]}
+  tool: {joints: [drill_spin]}
+joints:
+  - {name: shoulder_pitch, actuator: {plugin: kondo_ics, id: 3}}
+  - {name: elbow_pitch, actuator: {plugin: kondo_ics, id: 5, direction: -1, offset_deg: 10.0}}
+  - {name: drill_spin, actuator: {plugin: kondo_ics, id: 9}}
