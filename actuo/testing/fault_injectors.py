@@ -128,6 +128,16 @@ class ServoFaultInjector(FaultInjector):
         Seconds to wait for a reply line.
     settle : float
         Seconds :meth:`plug` waits after powering a port, for the servo to boot.
+    signal_after_s : float
+        With ``unplug_by: power``, seconds a port's signal stays cut after its
+        power comes on (:meth:`plug`, :meth:`restore`): a connector whose power
+        pins mate first. 0 (default) connects both at once, as a plain plug
+        does. A KRS servo powered with its signal on an RCB-4mini's live ICS
+        line sometimes starts in a state that blocks the whole line until it
+        is powered off (19 of 30 power-ons of three servos at once, against
+        30 of 30 with the signal 1 s later, 2026-11-25). The firmware connects
+        the signal with the power and this cuts it again a command later, so
+        the servo sees the line for about a millisecond.
     """
 
     VID = 0x2E8A
@@ -135,13 +145,19 @@ class ServoFaultInjector(FaultInjector):
     capabilities = frozenset({UNPLUG, UNPLUG_MANY, DROP_REPLIES, POWER})
 
     def __init__(self, port: Optional[str] = None, unplug_by: str = "power",
-                 timeout: float = 1.0, settle: float = 0.0) -> None:
+                 timeout: float = 1.0, settle: float = 0.0,
+                 signal_after_s: float = 0.0) -> None:
         if unplug_by not in ("power", "signal"):
             raise ValueError("unplug_by must be 'power' or 'signal', got {!r}"
                              .format(unplug_by))
         self.unplug_by = unplug_by
         self.timeout = float(timeout)
         self.settle = float(settle)
+        self.signal_after_s = float(signal_after_s)
+        if self.signal_after_s < 0:
+            raise ValueError("signal_after_s must be >= 0")
+        if self.signal_after_s and unplug_by != "power":
+            raise ValueError("signal_after_s needs unplug_by: power")
         if port is None:
             found = [p.device for p in list_ports.comports() if p.vid == self.VID]
             if len(found) != 1:
@@ -190,7 +206,7 @@ class ServoFaultInjector(FaultInjector):
     def plug(self, target: int) -> None:
         port = self._check(target)
         if self.unplug_by == "power":
-            self.command("power {} on".format(port))
+            self._power_on([port])
             if self.settle > 0:
                 time.sleep(self.settle)
         else:
@@ -199,8 +215,22 @@ class ServoFaultInjector(FaultInjector):
     def drop_replies(self, target: int, servo_id: int) -> None:
         self.command("drop {} {}".format(self._check(target), int(servo_id)))
 
+    def _power_on(self, ports: Sequence[int]) -> None:
+        """Power ``ports`` on; with ``signal_after_s`` their signal follows."""
+        for port in ports:
+            self.command("power {} on".format(port))
+            if self.signal_after_s:
+                self.command("isolate {}".format(port))
+        if self.signal_after_s and ports:
+            time.sleep(self.signal_after_s)
+            for port in ports:
+                self.command("unisolate {}".format(port))
+
     def restore(self) -> None:
-        self.command("power all on")
+        if self.signal_after_s:
+            self._power_on([int(p["n"]) for p in self.status() if not p.get("power")])
+        else:
+            self.command("power all on")
         self.command("pass")
 
     def status(self) -> List[dict]:

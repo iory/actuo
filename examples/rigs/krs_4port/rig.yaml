@@ -9,6 +9,11 @@ modes: [../feetech_4port/tool_change.yaml, ../feetech_4port/reconfigurable.yaml]
 injector:
   plugin: servo_fault_injector
   unplug_by: power        # PORT 4's signal switch does not open on the first v0.1 board
+  # A KRS powered with its signal on the RCB-4mini's live ICS line sometimes
+  # starts blocking the whole line until powered off (19 of 30 power-ons of
+  # ports 1-3 at once; 30 of 30 with the signal 1 s later, 2026-11-25). PORT 4
+  # cannot cut its signal, so it can still do this.
+  signal_after_s: 1.0
 targets: {j1: 1, j2: 2, j3: 3, j4: 4}
 # The board's firmware reads FEETECH packets only, so it cannot cut ICS replies.
 drop_joints: []

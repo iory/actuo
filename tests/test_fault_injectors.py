@@ -44,6 +44,30 @@ def test_unplug_by_power_switches_the_port_off_and_back_on(monkeypatch):
     assert port.sent == ["power 3 off", "power 3 on", "power all on", "pass"]
 
 
+def test_signal_after_power_cuts_the_signal_until_the_servo_has_booted(monkeypatch):
+    def answer(line):
+        if line == "status":
+            return ["port n=1 power=1 isolated=0", "port n=2 power=0 isolated=1", "ok status"]
+        return ["ok " + line]
+    port = board(monkeypatch, answer)
+    sleeps = []
+    monkeypatch.setattr(fi.time, "sleep", sleeps.append)
+    sfi = fi.ServoFaultInjector(port="/dev/x", timeout=0.1, signal_after_s=1.0)
+    sfi.plug(3)
+    assert port.sent == ["power 3 on", "isolate 3", "unisolate 3"]
+    assert sleeps == [1.0]
+    port.sent.clear()
+    sfi.restore()
+    # Only the port that was off is powered, and its signal follows.
+    assert port.sent == ["status", "power 2 on", "isolate 2", "unisolate 2", "pass"]
+
+
+def test_signal_after_power_needs_unplug_by_power(monkeypatch):
+    board(monkeypatch)
+    with pytest.raises(ValueError, match="unplug_by: power"):
+        fi.ServoFaultInjector(port="/dev/x", unplug_by="signal", signal_after_s=1.0)
+
+
 def test_unplug_by_signal_isolates_the_port(monkeypatch):
     port = board(monkeypatch)
     sfi = fi.ServoFaultInjector(port="/dev/x", unplug_by="signal", timeout=0.1)
