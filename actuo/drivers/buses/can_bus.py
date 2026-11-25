@@ -10,6 +10,16 @@ Why there is no ``transact``
 CAN is broadcast and these drivers upload status on their own schedule, so a
 control cycle is "burst N command frames, then drain whatever has arrived".
 Commands and state are decoupled; there is no request/response to pair up.
+
+Motors that come and go (``hot_plug``) and watched ids
+------------------------------------------------------
+With ``hot_plug`` a motor is present while its last status frame is no older
+than ``stale_after``; one that never reported, or went quiet, is absent, gets
+only its release frame, and does not hold up the cycle read. Watched ids
+(:meth:`CanBus.watch`) are motors the bus does not drive; they count as
+answering while their status frames keep arriving, attributed by the
+model's ``status_source``. Nothing is ever sent to them, so models that
+answer only when addressed (2.0 MIT) cannot be watched, and say so.
 """
 
 from __future__ import annotations
@@ -22,6 +32,7 @@ from actuo.core.contracts import (
     ActuatorCommand,
     ActuatorState,
     Bus,
+    CapabilityError,
     DeviceId,
     Frame,
     OperatingMode,
@@ -87,17 +98,31 @@ class CanBus(Bus):
     stale_after : float
         Seconds without a status frame before an actuator counts as stale.
         Defaults to 1.0 s, a threshold proven workable with a 20 Hz
-        keepalive.
+        keepalive. With ``hot_plug``, also how long a motor stays present
+        after its last frame.
+    hot_plug : bool
+        Motors may be absent at start and may come and go (see the module
+        docstring).
+    watch_ids : sequence
+        Node ids of motors this bus does not drive whose presence is wanted.
     """
+
+    supports_hot_plug = True
+    supports_watch = True
 
     def __init__(
         self,
         transport: Transport,
         actuators: Sequence[Actuator],
         stale_after: float = 1.0,
+        hot_plug: bool = False,
+        watch_ids: Sequence[DeviceId] = (),
     ) -> None:
         super().__init__(transport, actuators)
         self.stale_after = stale_after
+        self.hot_plug = bool(hot_plug)
+        self._watch_ids: Tuple[DeviceId, ...] = ()
+        self._watch_rx: Dict[DeviceId, float] = {}
         self._states: Dict[DeviceId, ActuatorState] = {}
         # Last loop each actuator was commanded in; check_speed needs it.
         self._last_mode: Dict[DeviceId, Optional[OperatingMode]] = {}
@@ -114,6 +139,72 @@ class CanBus(Bus):
         self._diag_last_error_frames: Optional[int] = None
         self._diag_last_unmatched_frames: Optional[int] = None
         self._diag_last_unmatched_addresses: Dict[int, int] = {}
+        if watch_ids:
+            self.watch(watch_ids)
+
+    # --- presence ------------------------------------------------------------
+    @property
+    def watch_ids(self) -> Tuple[DeviceId, ...]:
+        return self._watch_ids
+
+    def watch(self, ids: Sequence[DeviceId]) -> None:
+        """Count status frames from ``ids`` (motors this bus does not drive).
+
+        Raises
+        ------
+        CapabilityError
+            A model on this bus answers only when addressed (watching it would
+            mean sending it frames), or cannot attribute a status frame to a
+            node id (no ``status_source``).
+        """
+        own = {a.id for a in self.actuators}
+        wanted = tuple(sorted((i for i in set(ids) if i not in own), key=str))
+        if wanted:
+            for actuator in self.actuators:
+                if getattr(actuator, "answers_only_when_addressed", False):
+                    raise CapabilityError(
+                        "{} answers only when addressed, so motors next to it "
+                        "cannot be watched without sending them frames (watch {})"
+                        .format(type(actuator).__name__, list(wanted)))
+                if not callable(getattr(actuator, "status_source", None)):
+                    raise CapabilityError(
+                        "{} cannot attribute a status frame to a node id, so "
+                        "this bus cannot watch {}".format(
+                            type(actuator).__name__, list(wanted)))
+        self._watch_ids = wanted
+        self._watch_rx = {i: t for i, t in self._watch_rx.items() if i in wanted}
+
+    def _fresh(self, seen_at: Optional[float]) -> bool:
+        return seen_at is not None and time.monotonic() - seen_at <= self.stale_after
+
+    def present(self, device_id: DeviceId) -> bool:
+        """Whether a motor reports: with ``hot_plug``, within ``stale_after``;
+        without it, ever."""
+        if self.hot_plug:
+            return self._fresh(self._last_rx.get(device_id))
+        return device_id in self._states
+
+    def absence_reason(self, device_id: DeviceId) -> str:
+        if self.present(device_id):
+            return ""
+        seen = self._last_rx.get(device_id)
+        if seen is None:
+            return "no status frame ever received"
+        return "silent for {:.2f} s (stale_after {:.2f} s)".format(
+            time.monotonic() - seen, self.stale_after)
+
+    def answering_ids(self) -> List[DeviceId]:
+        ids = {a.id for a in self.actuators if self.present(a.id)}
+        ids.update(i for i, t in self._watch_rx.items() if self._fresh(t))
+        return sorted(ids, key=str)
+
+    def _watched_source(self, frame: Frame) -> Optional[DeviceId]:
+        """The watched id ``frame`` is a status frame of, if any."""
+        for actuator in self.actuators:
+            source = actuator.status_source(frame)
+            if source is not None:
+                return source if source in self._watch_ids else None
+        return None
 
     def set_joint_names(self, joint_names: Sequence[str]) -> None:
         """Name each configured id for operator-facing diagnostics."""
@@ -203,6 +294,8 @@ class CanBus(Bus):
         # has answered its first: see _await_replies.
         follow: Dict[DeviceId, Frame] = {}
         for actuator, command in zip(self.actuators, commands):
+            if command is not None and self.hot_plug and not self.present(actuator.id):
+                command = None      # an absent motor gets its release only
             if command is None:
                 # A release is an EXIT on a model that has one: whatever arming
                 # there was is gone, and the next command must arm again. A
@@ -364,6 +457,11 @@ class CanBus(Bus):
             self._states[actuator.id] = actuator.decode_state(frame)
             self._last_rx[actuator.id] = time.monotonic()
             return actuator.id
+        if self._watch_ids:
+            source = self._watched_source(frame)
+            if source is not None:
+                self._watch_rx[source] = time.monotonic()
+                return None
         self._unmatched_frames += 1
         if frame.address is not None:
             key = int(frame.address)
@@ -375,12 +473,16 @@ class CanBus(Bus):
 
         Waits up to ``timeout`` for every actuator to report at least once
         during this call, then returns the cache. Raises rather than inventing
-        a state for a silent motor.
+        a state for a silent motor -- except with ``hot_plug``, where only the
+        present motors are waited for and an absent one's state is its last
+        (``None`` before its first).
         """
         deadline = time.monotonic() + timeout
         seen: set = set()
+        waited = ({a.id for a in self.actuators if self.present(a.id)}
+                  if self.hot_plug else {a.id for a in self.actuators})
 
-        while len(seen) < len(self.actuators):
+        while not waited <= seen:
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 break
@@ -391,6 +493,12 @@ class CanBus(Bus):
             if device_id is not None:
                 seen.add(device_id)
 
+        if self.hot_plug:
+            # Waiting covered only the present motors; whatever else has
+            # arrived is taken in too, or an absent motor that came back (or
+            # every motor, after all were absent) would never be noticed.
+            self.poll_counts(timeout=0.0)
+            return [self._states.get(a.id) for a in self.actuators]
         missing = [a.id for a in self.actuators if a.id not in self._states]
         if missing:
             raise StaleFeedbackError(

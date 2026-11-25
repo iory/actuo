@@ -131,7 +131,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from actuo.core.contracts import Actuator, Bus, Transport
+from actuo.core.contracts import Actuator, Bus, Transport, require_presence
 from actuo.core.registry import get_actuator, get_transport
 
 # Each actuator family and bus is imported by the builder that uses it, not
@@ -763,6 +763,27 @@ def joints_with_servo_map(document: Dict[str, Any], path: str
     return out
 
 
+#: Bus plugin -> (module, class), imported only when a config names it.
+_BUS_CLASSES = {
+    "can_bus": ("actuo.drivers.buses.can_bus", "CanBus"),
+    "dynamixel_bus": ("actuo.drivers.buses.dynamixel_bus", "DynamixelBus"),
+    "feetech_bus": ("actuo.drivers.buses.feetech_bus", "FeetechBus"),
+    "kondo_h7_bus": ("actuo.drivers.buses.kondo_h7_bus", "KondoH7Bus"),
+    "kondo_rcb4_bus": ("actuo.drivers.buses.kondo_rcb4_bus", "KondoRcb4Bus"),
+    "serial_bus": ("actuo.drivers.buses.serial_bus", "SerialBus"),
+}
+
+
+def _bus_class(bus_plugin: str) -> type:
+    import importlib
+
+    if bus_plugin not in _BUS_CLASSES:
+        raise KeyError("unknown bus plugin {!r}; known: {}".format(
+            bus_plugin, ", ".join(sorted(_BUS_CLASSES))))
+    module, name = _BUS_CLASSES[bus_plugin]
+    return getattr(importlib.import_module(module), name)
+
+
 def build_bus(
     path: str, transport_overrides: "Dict[str, Any] | None" = None,
     bus_overrides: "Dict[str, Any] | None" = None,
@@ -838,6 +859,13 @@ def build_bus(
                 "still a config that cannot work.".format(
                     path, declared, model_protocol))
 
+    # Presence is one contract for every bus (actuo.core.contracts.Bus): a
+    # bus that cannot take servos away or watch other ids refuses here, before
+    # its transport is opened, rather than ignoring the keys.
+    hot_plug = bool(bus_spec.get("hot_plug", False))
+    watch_ids = tuple(int(i) for i in bus_spec.get("watch_ids", ()))
+    require_presence(_bus_class(bus_plugin), hot_plug, watch_ids)
+
     transport = build_transport(transport_spec)
     if bus_plugin == "kondo_h7_bus":
         from actuo.drivers.buses.kondo_h7_bus import DEFAULT_STATE_SLOTS, KondoH7Bus
@@ -869,7 +897,8 @@ def build_bus(
                 bus_spec.get("connect_bitrates", DEFAULT_CONNECT_BITRATES)),
             nak_retries=int(bus_spec.get("nak_retries", DEFAULT_NAK_RETRIES)),
             battery_voltage_warn_below=bus_spec.get("battery_voltage_warn_below"),
-            hot_plug=bool(bus_spec.get("hot_plug", False)),
+            hot_plug=hot_plug,
+            watch_ids=watch_ids,
             presence_period=int(bus_spec.get("presence_period",
                                              DEFAULT_PRESENCE_PERIOD)),
             absent_timeout_s=float(bus_spec.get("absent_timeout_s",
@@ -894,30 +923,37 @@ def build_bus(
             read_timeout=float(bus_spec.get("read_timeout", 0.05)),
             use_sync_read=bool(bus_spec.get("use_sync_read", True)),
             reset_torque_limit=bool(bus_spec.get("reset_torque_limit", True)),
-            hot_plug=bool(bus_spec.get("hot_plug", False)),
+            hot_plug=hot_plug,
             absent_after_misses=int(bus_spec.get(
                 "absent_after_misses", FEETECH_DEFAULT_ABSENT_AFTER_MISSES)),
             presence_period=int(bus_spec.get(
                 "presence_period", FEETECH_DEFAULT_PRESENCE_PERIOD)),
             probe_timeout=float(bus_spec.get(
                 "probe_timeout", FEETECH_DEFAULT_PROBE_TIMEOUT)),
-            watch_ids=tuple(int(i) for i in bus_spec.get("watch_ids", ())))
+            watch_ids=watch_ids)
     elif bus_plugin == "dynamixel_bus":
         from actuo.drivers.buses.dynamixel_bus import DynamixelBus
+        from actuo.drivers.buses.presence import (
+            DEFAULT_ABSENT_AFTER_MISSES, DEFAULT_PRESENCE_PERIOD as PRESENCE_PERIOD)
         bus = DynamixelBus(
             transport, actuators,
             read_timeout=float(bus_spec.get("read_timeout", 0.05)),
             use_sync_read=bool(bus_spec.get("use_sync_read", True)),
             silence_error_misses=int(bus_spec.get("silence_error_misses", 10)),
-            silence_error_age_s=float(bus_spec.get("silence_error_age_s", 1.0)))
+            silence_error_age_s=float(bus_spec.get("silence_error_age_s", 1.0)),
+            hot_plug=hot_plug,
+            absent_after_misses=int(bus_spec.get(
+                "absent_after_misses", DEFAULT_ABSENT_AFTER_MISSES)),
+            presence_period=int(bus_spec.get("presence_period", PRESENCE_PERIOD)),
+            probe_timeout=float(bus_spec.get("probe_timeout", 0.01)),
+            watch_ids=watch_ids)
     elif bus_plugin == "can_bus":
         from actuo.drivers.buses.can_bus import CanBus
         bus = CanBus(
             transport, actuators,
-            stale_after=float(bus_spec.get("stale_after", 1.0)))
-    else:
-        raise KeyError(
-            "unknown bus plugin {!r}; known: can_bus, dynamixel_bus, feetech_bus, "
-            "kondo_h7_bus, kondo_rcb4_bus, serial_bus"
-            .format(bus_plugin))
+            stale_after=float(bus_spec.get("stale_after", 1.0)),
+            hot_plug=hot_plug,
+            watch_ids=watch_ids)
+    else:                                  # _bus_class refused it above
+        raise KeyError("unknown bus plugin {!r}".format(bus_plugin))
     return bus, names

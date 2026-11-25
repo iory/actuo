@@ -395,15 +395,11 @@ class ServoSupervisor:
         """
         command = shm.read_command()
         out: List[JointServo] = []
-        hot_plug = bool(getattr(self.bus, "hot_plug", False))
-        bus_present = getattr(self.bus, "present", None)
-        bus_reason = getattr(self.bus, "absence_reason", None)
+        hot_plug = bool(self.bus.hot_plug)
         for i, (name, actuator) in enumerate(zip(self.joint_names, self.bus.actuators)):
             state = self.bus.last_state(actuator.id)
-            present = (bool(bus_present(actuator.id)) if callable(bus_present)
-                       else state is not None)
-            reason = ("" if present or not callable(bus_reason)
-                      else str(bus_reason(actuator.id)))
+            present = bool(self.bus.present(actuator.id))
+            reason = "" if present else str(self.bus.absence_reason(actuator.id))
             if state is None and hot_plug:
                 # Absent since start on a hot-plug bus: described, not
                 # invented -- every quantity is NaN.
@@ -1265,12 +1261,10 @@ class ServoSupervisor:
         if not pending:
             return True, "already on: {}".format(", ".join(target))
 
-        present = getattr(self.bus, "present", None)
-        if callable(present):
-            gone = [n for n in pending
-                    if not present(self.bus.actuators[self.joint_names.index(n)].id)]
-            if gone:
-                return False, "refusing: {} not answering".format(", ".join(gone))
+        gone = [n for n in pending
+                if not self.bus.present(self.bus.actuators[self.joint_names.index(n)].id)]
+        if gone:
+            return False, "refusing: {} not answering".format(", ".join(gone))
 
         wanted = [j for j in self.inspect(shm) if j.name in set(pending)]
 

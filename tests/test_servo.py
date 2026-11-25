@@ -17,6 +17,7 @@ _HERE = os.path.dirname(__file__)
 from actuo.core.contracts import (  # noqa: E402
     ActuatorState, Capabilities, OperatingMode)
 from actuo.drivers.servo import ServoSupervisor  # noqa: E402
+from actuo.core.contracts import Bus as _ContractBus
 
 STRIDE = 3
 
@@ -48,6 +49,11 @@ class FakeActuator:
 
 class FakeBus:
     """Records what the supervisor put on the wire, and nothing else."""
+    # The presence contract, as actuo.core.contracts.Bus defines it for a bus
+    # that never takes a servo away.
+    hot_plug = False
+    present = _ContractBus.present
+    absence_reason = _ContractBus.absence_reason
 
     def __init__(self, positions):
         self.actuators = [FakeActuator(104 + i) for i in range(len(positions))]

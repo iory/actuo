@@ -60,6 +60,16 @@ With ``hot_plug`` this is looked at again at every presence check, so a servo
 moved to the other side of the board is followed; it reads absent for one
 presence period first, so the servicer releases it and it comes back limp
 rather than snapping to its old target.
+
+Watched ids (``watch_ids``)
+---------------------------
+Ids that are not this bus's servos but whose presence is wanted -- another
+configuration's servos on a modular robot (:mod:`actuo.modular`). Their ICS
+numbers (both, with ``port_detect``) are assigned like the bus's own, so the
+board polls them, and their presence is decided the same way, by whether the
+board keeps rewriting the pulse. They are never in a servo packet: the board
+sends them only the OFF reference their record was set up with. They stay
+assigned while silent, so one plugged in later is noticed.
 """
 
 from __future__ import annotations
@@ -71,7 +81,7 @@ from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from actuo.core.contracts import (
-    ActuatorCommand, ActuatorState, Bus, Frame, OperatingMode)
+    ActuatorCommand, ActuatorState, Bus, CapabilityError, Frame, OperatingMode)
 from actuo.core.diagnostics import DiagItem, DiagLevel
 
 from actuo.drivers.actuators.kondo_ics import (
@@ -247,7 +257,13 @@ class KondoRcb4Bus(Bus):
         Each actuator ``id`` is the servo's ICS ID (0..17), not its ICS
         number, and the bus finds which port it is plugged into. See the
         module docstring.
+    watch_ids : sequence of int
+        Ids, in the same numbering as the actuators', that are not this bus's
+        servos but whose presence is wanted (see the module docstring).
     """
+
+    supports_hot_plug = True
+    supports_watch = True
 
     def __init__(self, transport, actuators,
                  state_slots: Sequence[str] = DEFAULT_STATE_SLOTS,
@@ -265,6 +281,7 @@ class KondoRcb4Bus(Bus):
                  port_detect: bool = False,
                  reading_jump_rad: Optional[float] = DEFAULT_READING_JUMP_RAD,
                  reading_confirm: int = DEFAULT_READING_CONFIRM,
+                 watch_ids: Sequence[int] = (),
                  clock=time.monotonic) -> None:
         super().__init__(transport, actuators)
         #: Set at startup, armed on the first write_batch (see _arm_failsafe).
@@ -341,8 +358,13 @@ class KondoRcb4Bus(Bus):
                         "ICS number {} is claimed by servo ids {} and {}".format(
                             slot, claimed[slot], servo_id))
                 claimed[slot] = servo_id
-        #: Every ICS number the board is asked to poll, ascending.
+        #: Every ICS number of this bus's servos, ascending.
         self._slots = sorted(claimed)
+        self._watch_ids: Tuple[int, ...] = ()
+        self._watch_candidates: Dict[int, List[int]] = {}
+        self._watch_slots: List[int] = []
+        self._connected = False
+        self._set_watch([int(i) for i in watch_ids])
         # Actuator id -> ICS number it is driven on; None while unknown.
         self._slot_of: Dict[int, Optional[int]] = {
             i: (None if self.port_detect else i) for i in self._ids}
@@ -352,9 +374,7 @@ class KondoRcb4Bus(Bus):
         # Id -> reads it still reads absent after moving to the other port.
         self._settling: Dict[int, int] = {}
         self._port_moves = 0
-        # Validates the slot names too.
-        self._reads = (plan_record_reads(self._slots, self.state_slots)
-                       if self._slots else [])
+        self._plan_reads()
         self.move_time_ms = move_time_ms
         self._bus_move_byte()  # refuse an unconvertible move_time_ms now
         move_bytes = {int(a.id): self._velocity_for(a) for a in actuators}
@@ -396,6 +416,66 @@ class KondoRcb4Bus(Bus):
         self._joint_name_by_id: Dict[int, str] = {}
         if joint_names is not None:
             self.set_joint_names(joint_names)
+
+    # --- watched ids ---------------------------------------------------------
+    def _set_watch(self, ids: Sequence[int]) -> None:
+        wanted = sorted(set(ids) - set(self._ids))
+        candidates: Dict[int, List[int]] = {}
+        for watched in wanted:
+            if self.port_detect:
+                if not 0 <= watched <= max_ics_id():
+                    raise ValueError("watched id {} is outside the ICS IDs (0..{})"
+                                     .format(watched, max_ics_id()))
+                slots = list(ics_numbers_of(watched))
+            else:
+                if not 0 <= watched < ICS_SLOT_COUNT:
+                    raise ValueError("watched id {} is outside the board's ICS "
+                                     "numbers (0..{})".format(watched, ICS_SLOT_COUNT - 1))
+                slots = [watched]
+            candidates[watched] = slots
+        self._watch_ids = tuple(wanted)
+        self._watch_candidates = candidates
+        self._watch_slots = sorted(s for slots in candidates.values() for s in slots)
+
+    def _plan_reads(self) -> None:
+        # Validates the slot names too.
+        polled = self._polled()
+        self._reads = plan_record_reads(polled, self.state_slots) if polled else []
+
+    def _polled(self) -> List[int]:
+        """Every ICS number the board is asked to poll: own and watched."""
+        return sorted(set(self._slots) | set(self._watch_slots))
+
+    def _tracked(self) -> List[int]:
+        """ICS numbers whose presence is followed while running."""
+        return self._polled() if self.hot_plug else list(self._watch_slots)
+
+    @property
+    def watch_ids(self) -> Tuple[int, ...]:
+        return self._watch_ids
+
+    def watch(self, ids: Sequence[int]) -> None:
+        """Set the watched ids. Before :meth:`verify_servos` only: their ICS
+        numbers are assigned on the board at connect.
+
+        Raises
+        ------
+        CapabilityError
+            Called with other ids after the bus connected.
+        """
+        if self._connected and sorted(set(ids) - set(self._ids)) != list(self._watch_ids):
+            raise CapabilityError(
+                "the RCB-4mini assigns watched ids at connect; give watch_ids "
+                "when building the bus (bus.watch_ids)")
+        self._set_watch([int(i) for i in ids])
+        self._plan_reads()
+
+    def answering_ids(self) -> List[int]:
+        """Present servos, and watched ids one of whose ICS numbers answers."""
+        ids = {i for i in self._ids if self.present(i)}
+        ids.update(w for w, slots in self._watch_candidates.items()
+                   if any(self._present.get(s) for s in slots))
+        return sorted(ids)
 
     def set_joint_names(self, joint_names: Sequence[str]) -> None:
         """Name each configured servo id for operator-facing messages."""
@@ -766,12 +846,13 @@ class KondoRcb4Bus(Bus):
                 self._missed += 1
                 continue
             raw.update(decode_servo_records(
-                address, data, self._slots, self.state_slots))
+                address, data, self._polled(), self.state_slots))
         if raw:
             self._state_updates += 1
 
-        if self.hot_plug:
-            for slot in self._slots:
+        tracked = self._tracked()
+        if tracked:
+            for slot in tracked:
                 values = raw.get(slot)
                 if values is None:
                     continue
@@ -792,6 +873,9 @@ class KondoRcb4Bus(Bus):
                     self._present[slot] = True
                     self._rewritten[slot] = True
                     self._last_rewrite[slot] = self._clock()
+        for slot in self._watch_slots:
+            raw.pop(slot, None)          # not this bus's servos: never decoded
+        if self.hot_plug:
             for servo_id in list(self._settling):
                 self._settling[servo_id] -= 1
                 if self._settling[servo_id] <= 0:
@@ -813,7 +897,7 @@ class KondoRcb4Bus(Bus):
                 if actuator.matches(frame):
                     self._accept(actuator.id, actuator.decode_state(frame))
             states.append(self._states.get(actuator.id))
-        if self.hot_plug:
+        if tracked:
             self._reads_since_check += 1
             if self._reads_since_check >= self.presence_period:
                 self._reads_since_check = 0
@@ -823,7 +907,7 @@ class KondoRcb4Bus(Bus):
                 # timeout that postponed noticing a pulled servo by 0.4-3.5 s
                 # (measured on the stack; the clear kept landing just before
                 # the timeout ran out).
-                self._clear_pulses([s for s in self._slots if self._present.get(s)
+                self._clear_pulses([s for s in tracked if self._present.get(s)
                                     and self._rewritten.get(s, True)])
         return states
 
@@ -1203,7 +1287,7 @@ class KondoRcb4Bus(Bus):
                 "this CHANGED the board; it reverts at power-off.".format(
                     remapped, ", ".join("{:#06x}".format(table[i]) for i in remapped)),
                 {"remapped_ids": ", ".join(str(i) for i in remapped)}))
-        unassigned = [i for i in self._slots if new_table[i] == ICS_UNASSIGNED]
+        unassigned = [i for i in self._polled() if new_table[i] == ICS_UNASSIGNED]
         if not unassigned:
             return [], items
 
@@ -1216,8 +1300,10 @@ class KondoRcb4Bus(Bus):
         time.sleep(self.assign_settle_s)
 
         present = self._read_present(unassigned)
-        answered = [i for i in unassigned if present.get(i)]
-        silent = [i for i in unassigned if not present.get(i)]
+        watched = set(self._watch_slots)
+        answered = [i for i in unassigned if present.get(i) and i not in watched]
+        # Watched numbers stay assigned while silent, like hot_plug ones.
+        silent = [i for i in unassigned if not present.get(i) and i not in watched]
         if silent and not self.hot_plug:
             # Leave the board as found for servos that are not there. With
             # hot_plug they stay assigned: the board polls only assigned
@@ -1270,7 +1356,7 @@ class KondoRcb4Bus(Bus):
         if self.port_detect:
             # A project-assigned record may hold a pulse from before, so
             # every number is cleared and has to be rewritten to count.
-            present = self._probe_present(self._slots)
+            present = self._probe_present(self._polled())
             self._slot_of = {i: None for i in self._ids}
             self._ambiguous = set()
             self._settling = {}
@@ -1282,12 +1368,12 @@ class KondoRcb4Bus(Bus):
         else:
             missing = [i for i in self._ids
                        if table[i] == ICS_UNASSIGNED and i not in answered]
-        if self.hot_plug:
+        if self._tracked():
             # Start (or restart, after a reconnect) the presence picture from
             # what the records hold now.
             if not self.port_detect:
-                present = self._read_present(self._slots) if self._slots else {}
-            self._present = {i: bool(present.get(i)) for i in self._slots}
+                present = self._read_present(self._polled())
+            self._present = {i: bool(present.get(i)) for i in self._tracked()}
             self._cleared_at = {}
             self._rewritten = {}
             self._last_rewrite = {}
@@ -1313,6 +1399,7 @@ class KondoRcb4Bus(Bus):
                 "bus/startup_missing", DiagLevel.WARN, message,
                 {"missing_ids": ", ".join(str(i) for i in missing)}))
         items.extend(self._arm_failsafe())
+        self._connected = True
         return items
 
     def failsafe_frames(self) -> List[Frame]:

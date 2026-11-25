@@ -44,8 +44,10 @@ the next interface's start-up, not a URDF parse.
 
 Each configuration's bus runs ``hot_plug`` with the other configurations' ids
 as ``watch_ids``, so the servos of a configuration that is not current are
-still seen coming and going (FEETECH buses; see
-:class:`~actuo.drivers.buses.feetech_bus.FeetechBus`).
+still seen coming and going. Any bus that offers both
+(:class:`actuo.core.contracts.Bus`: ``supports_hot_plug``,
+``supports_watch``) will do -- FEETECH, DYNAMIXEL, RCB-4mini, CAN servo-mode
+drives; one that does not is refused when the configuration's bus is built.
 """
 
 from __future__ import annotations
@@ -290,12 +292,6 @@ class ModularRobot:
             startup_timeout=self.startup_timeout, required_joints=[],
             bus_overrides={"hot_plug": True, "watch_ids": watch},
             hold_joints=list(hold))
-        if not callable(getattr(ri.bus, "answering_ids", None)):
-            ri.close()
-            raise TypeError(
-                "{}: {} cannot report which ids answer outside its own servos; "
-                "ModularRobot needs a bus with watch_ids (FeetechBus)".format(
-                    name, type(ri.bus).__name__))
         return ri
 
     def _switch(self, name: str) -> None:

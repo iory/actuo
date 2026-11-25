@@ -55,6 +55,8 @@ from actuo.core.contracts import (
     ActuatorCommand, ActuatorState, Bus, CapabilityError, Frame, OperatingMode)
 from actuo.core.diagnostics import DiagItem, DiagLevel
 from actuo.drivers import feetech_protocol as fp
+from actuo.drivers.buses.presence import (
+    ABSENT, DEFAULT_ABSENT_AFTER_MISSES, DEFAULT_PRESENCE_PERIOD, PresenceTracker)
 from actuo.drivers.actuators.feetech_sts import (
     STATE_BLOCK_ADDR, STATE_BLOCK_LEN, TORQUE_LIMIT_FULL_SCALE,
     WIRE_MODE_POSITION, FeetechStsActuator)
@@ -83,10 +85,6 @@ def hls_homing_offset(raw: int, target: int, max_offset: int,
     return max_offset, (raw - max_offset) % resolution
 
 
-#: SYNC_READs in a row without a reply that make a hot-plug servo absent.
-DEFAULT_ABSENT_AFTER_MISSES = 3
-#: read_batch calls between probes of an absent servo.
-DEFAULT_PRESENCE_PERIOD = 10
 #: Seconds an absent servo's probe waits: one reply at 1 Mbit/s plus USB latency.
 DEFAULT_PROBE_TIMEOUT = 0.01
 
@@ -128,6 +126,9 @@ class FeetechBus(Bus):
         :meth:`answering_ids` reports them. They are never written.
     """
 
+    supports_hot_plug = True
+    supports_watch = True
+
     def __init__(self, transport, actuators, read_timeout: float = 0.05,
                  use_sync_read: bool = True,
                  reset_torque_limit: bool = True,
@@ -145,23 +146,13 @@ class FeetechBus(Bus):
         self.use_sync_read = bool(use_sync_read)
         self.reset_torque_limit = bool(reset_torque_limit)
         self.hot_plug = bool(hot_plug)
-        if int(absent_after_misses) < 1 or int(presence_period) < 1:
-            raise ValueError("absent_after_misses and presence_period must be >= 1")
-        self.absent_after_misses = int(absent_after_misses)
-        self.presence_period = int(presence_period)
         self.probe_timeout = float(probe_timeout)
-        own = {int(a.id) for a in self.actuators}
-        self.watch_ids = tuple(sorted({int(i) for i in watch_ids} - own))
-        self._watched: Dict[int, bool] = {}
-        # Hot-plug bookkeeping: who is present, why the others are not, and
-        # which absent servo the next probe asks.
-        self._present: Dict[int, bool] = {}
-        self._absent_why: Dict[int, str] = {}
-        self._reads = 0
-        self._probe_turn = 0
+        self.presence = PresenceTracker(
+            [int(a.id) for a in self.actuators], hot_plug=self.hot_plug,
+            absent_after_misses=absent_after_misses, presence_period=presence_period,
+            watch_ids=[int(i) for i in watch_ids])
         self._states: Dict[int, ActuatorState] = {}
         self._missed = 0
-        self._consecutive_misses: Dict[int, int] = {}
         self._last_rx: Dict[int, float] = {}
         self._joint_name_by_id: Dict[int, str] = {}
 
@@ -177,6 +168,22 @@ class FeetechBus(Bus):
     def last_state(self, actuator_id: int) -> Optional[ActuatorState]:
         return self._states.get(actuator_id)
 
+    @property
+    def absent_after_misses(self) -> int:
+        return self.presence.absent_after_misses
+
+    @property
+    def presence_period(self) -> int:
+        return self.presence.presence_period
+
+    @property
+    def watch_ids(self) -> Tuple[int, ...]:
+        return self.presence.watch_ids
+
+    def watch(self, ids: Sequence[int]) -> None:
+        """PING ``ids`` in the probe rotation from now on (see ``watch_ids``)."""
+        self.presence.set_watch_ids(int(i) for i in ids)
+
     def present(self, actuator_id: int) -> bool:
         """Whether a servo is answering.
 
@@ -184,19 +191,14 @@ class FeetechBus(Bus):
         ``absent_after_misses`` reads in a row since. Without it a servo is
         never taken away, so this is whether it has ever reported.
         """
-        if self.hot_plug:
-            return self._present.get(int(actuator_id), False)
-        return int(actuator_id) in self._states
+        return self.presence.present(int(actuator_id))
 
     def absence_reason(self, actuator_id: int) -> str:
         """Why a servo is not present; empty when it is."""
-        if self.present(actuator_id):
-            return ""
-        return self._absent_why.get(int(actuator_id), "never answered")
+        return self.presence.absence_reason(int(actuator_id))
 
     def _mark_absent(self, actuator_id: int, why: str) -> None:
-        self._present[actuator_id] = False
-        self._absent_why[actuator_id] = why
+        self.presence.mark_absent(actuator_id, why)
 
     def set_joint_names(self, joint_names: Sequence[str]) -> None:
         if len(joint_names) != len(self.actuators):
@@ -277,8 +279,7 @@ class FeetechBus(Bus):
                     level=DiagLevel.ERROR, message=str(error),
                     values={"id": str(actuator.id)}))
                 continue
-            self._present[actuator.id] = True
-            self._absent_why.pop(actuator.id, None)
+            self.presence.mark_present(actuator.id)
         return items
 
     def _check_servo(self, actuator: FeetechStsActuator,
@@ -380,8 +381,8 @@ class FeetechBus(Bus):
         state (``None`` until it has answered once) and counts as a miss --
         never a faked zero."""
         wait = self.read_timeout if timeout is None else float(timeout)
-        polled = [a for a in self.actuators
-                  if not self.hot_plug or self.present(a.id)]
+        asked = set(self.presence.polled(a.id for a in self.actuators))
+        polled = [a for a in self.actuators if a.id in asked]
         fresh = (self._sync_read(polled, wait) if self.use_sync_read
                  else self._individual_reads(polled, wait))
         now = time.monotonic()
@@ -391,52 +392,38 @@ class FeetechBus(Bus):
             state = fresh.get(actuator.id)
             if state is None and actuator.id in polled_ids:
                 self._missed += 1
-                misses = self._consecutive_misses.get(actuator.id, 0) + 1
-                self._consecutive_misses[actuator.id] = misses
-                if self.hot_plug and misses >= self.absent_after_misses:
-                    self._mark_absent(actuator.id, "no reply to {} reads in a row"
-                                      .format(misses))
+                self.presence.missed(actuator.id)
             elif state is not None:
                 self._states[actuator.id] = state
                 self._last_rx[actuator.id] = now
-                self._consecutive_misses[actuator.id] = 0
+                self.presence.answered(actuator.id)
             states.append(self._states.get(actuator.id))
-        self._reads += 1
-        if ((self.hot_plug or self.watch_ids)
-                and self._reads % self.presence_period == 0):
-            self._probe_next()
+        probe = self.presence.next_probe()
+        if probe is not None:
+            kind, servo_id = probe
+            if kind == ABSENT:
+                self._probe_absent(self._by_id(servo_id))
+            else:
+                self._probe_watched(servo_id)
         return states
 
-    def _probe_next(self) -> None:
-        """Probe the next absent servo or watched id, in turn (one per call)."""
-        absent = ([a for a in self.actuators if not self.present(a.id)]
-                  if self.hot_plug else [])
-        turn = absent + list(self.watch_ids)
-        if not turn:
-            return
-        item = turn[self._probe_turn % len(turn)]
-        self._probe_turn += 1
-        if isinstance(item, int):
-            self._probe_watched(item)
-        else:
-            self._probe_absent(item)
+    def _by_id(self, servo_id: int) -> FeetechStsActuator:
+        return next(a for a in self.actuators if a.id == servo_id)
 
     def _probe_watched(self, servo_id: int) -> None:
         """PING a watched id and record whether it answered."""
         reply = self.transport.transact(
             [Frame(payload=fp.build_ping(servo_id), address=servo_id)],
             self.probe_timeout)[0]
-        self._watched[servo_id] = reply is not None
+        self.presence.watched_answered(servo_id, reply is not None)
 
     def watched(self, servo_id: int) -> bool:
         """Whether a watched id answered its last PING (False before the first)."""
-        return self._watched.get(int(servo_id), False)
+        return self.presence.watched(int(servo_id))
 
     def answering_ids(self) -> List[int]:
         """Every id known to answer now: present servos and watched ids."""
-        ids = {a.id for a in self.actuators if self.present(a.id)}
-        ids.update(i for i, seen in self._watched.items() if seen)
-        return sorted(ids)
+        return self.presence.answering_ids()
 
     def _probe_absent(self, actuator: FeetechStsActuator) -> None:
         """Ask one absent servo whether it is back; check it if so.
@@ -458,9 +445,7 @@ class FeetechBus(Bus):
             # not back yet (a connector still being pushed in).
             self._mark_absent(actuator.id, "answered, then {}".format(error))
             return
-        self._present[actuator.id] = True
-        self._absent_why.pop(actuator.id, None)
-        self._consecutive_misses[actuator.id] = 0
+        self.presence.mark_present(actuator.id)
 
     def _individual_reads(self, actuators, timeout: float) -> Dict[int, ActuatorState]:
         queries: List[Frame] = []
@@ -624,7 +609,7 @@ class FeetechBus(Bus):
         now = time.monotonic()
         for actuator in self.actuators:
             state = self._states.get(actuator.id)
-            streak = self._consecutive_misses.get(actuator.id, 0)
+            streak = self.presence.consecutive_misses(actuator.id)
             age = (None if actuator.id not in self._last_rx
                    else now - self._last_rx[actuator.id])
             values = {"actuator_id": str(actuator.id),

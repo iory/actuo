@@ -392,14 +392,23 @@ class CubeMarsActuator(Actuator):
         the wrong bitrate produces error frames whose garbled ids can collide
         with a real node id, and decoding one would fabricate a joint angle.
         """
+        return self.status_source(frame) == self.node_id
+
+    def status_source(self, frame: Frame) -> Optional[int]:
+        """Node id of the motor whose status ``frame`` is, or ``None`` when it
+        is not a status frame of this family (see :meth:`matches`).
+
+        What lets a bus tell whether a motor it does not drive is on the wire
+        (:meth:`actuo.drivers.buses.can_bus.CanBus.watch`).
+        """
         if frame.address is None:
-            return False
+            return None
         if frame.meta.get("error_frame") or frame.meta.get("remote_frame"):
-            return False
+            return None
         address = int(frame.address)
-        if (address & 0xFF) != self.node_id:
-            return False
-        return not _is_command_packet(address >> 8)
+        if _is_command_packet(address >> 8):
+            return None
+        return address & 0xFF
 
     def encode_command(self, command: ActuatorCommand) -> Frame:
         self.capabilities.require(command.mode)

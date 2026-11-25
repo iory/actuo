@@ -10,6 +10,7 @@ import pytest
 from actuo.core.contracts import ActuatorState, Capabilities, OperatingMode
 from actuo.drivers.guarded_move import GuardedMove
 from actuo.drivers.servo import ServoSupervisor
+from actuo.core.contracts import Bus as _ContractBus
 
 STRIDE = 3
 
@@ -57,6 +58,11 @@ class Actuator:
 
 
 class Bus:
+    # The presence contract, as actuo.core.contracts.Bus defines it for a bus
+    # that never takes a servo away.
+    hot_plug = False
+    present = _ContractBus.present
+    absence_reason = _ContractBus.absence_reason
     def __init__(self, positions, limit=None):
         self.actuators = [Actuator(10 + i, limit) for i in range(len(positions))]
         self.positions = list(positions)

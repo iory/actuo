@@ -58,8 +58,8 @@ commands are fenced and rate-limited). `examples/ri_with_emulator.py` runs a
 real robot config and URDF (an RCB-4mini humanoid) against the RCB-4mini
 emulator.
 
-On a bus whose servos may be missing (`hot_plug: true` on the RCB-4mini or FEETECH bus),
-the config can list more joints than are plugged in:
+On a bus whose servos may be missing (`hot_plug: true`), the config can list
+more joints than are plugged in:
 
 ```python
 ri = ActuoRobotInterface(robot, "arm_rcb4.yaml", required_joints=["base_joint"])
@@ -71,6 +71,22 @@ starts from where it is, and it is limp until `servo_on`. A vector goal moves
 the attached joints; naming a detached joint is an error. A servo that stops
 answering is switched off, its motion is dropped and its measurement becomes
 NaN, so when it is plugged back in it comes back limp, from where it then is.
+
+Presence is one contract for every bus (`actuo.core.contracts.Bus`:
+`present`, `absence_reason`, `watch`, `answering_ids`), and a bus says what it
+can do (`supports_hot_plug`, `supports_watch`). A config that asks a bus for
+what it cannot do is refused when the bus is built, not ignored:
+
+| bus | `hot_plug` | `watch_ids` (ids it does not drive) |
+| --- | --- | --- |
+| FEETECH | missed SYNC_READs; probe with a facts read | PING |
+| DYNAMIXEL | missed reads; probe with PING (2.0) or a model-number READ (1.0), model checked | same probe |
+| RCB-4mini | whether the board keeps rewriting the pulse | the ICS numbers assigned, never driven |
+| CAN (servo-mode CubeMars) | a status frame within `stale_after` | status frames arriving (`status_source`) |
+| CAN (2.0 MIT) | as above | refused: it answers only when addressed |
+| ARM-H7, serial | refused | refused |
+
+Request/response buses share the bookkeeping (`actuo.drivers.buses.presence`).
 
 ### One robot, several robots: `actuo.modular`
 
@@ -101,8 +117,8 @@ mr.resume_detection()        # or let the servos that answer decide again
   other names and calibration) a switch took 18-39 ms, detection noticed the
   servos change within about 1.3 s, and held servos did not move by one count.
 
-FEETECH buses only for now: detection needs the bus to see ids outside the
-current configuration (`watch_ids`).
+Detection needs the bus to see ids outside the current configuration
+(`watch_ids`), so it runs on any bus in the table above that supports both.
 
 ### Testing it on hardware: fault injectors and rigs
 

@@ -16,6 +16,7 @@ from actuo.drivers.actuators.feetech_sts import (  # noqa: E402
     FeetechStsActuator, FeetechStsCalibration, ServoFacts, model_by_name)
 from actuo.drivers.buses.feetech_bus import FeetechBus  # noqa: E402
 from actuo.drivers.servo import ServoSupervisor  # noqa: E402
+from actuo.core.contracts import Bus as _ContractBus
 
 
 def _sm(value, bit):
@@ -126,6 +127,11 @@ def test_a_write_without_effect_is_an_error():
 
 
 class FakeBus:
+    # The presence contract, as actuo.core.contracts.Bus defines it for a bus
+    # that never takes a servo away.
+    hot_plug = False
+    present = _ContractBus.present
+    absence_reason = _ContractBus.absence_reason
     def __init__(self, position, outcome=None):
         self.actuators = [type("A", (), {
             "id": 1, "capabilities": Capabilities(modes=(OperatingMode.POSITION,)),

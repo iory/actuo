@@ -579,14 +579,11 @@ def _needs_position(actuator) -> bool:
 def _is_present(bus, actuator) -> bool:
     """Whether an actuator answers, as published in the shm presence flag.
 
-    A bus that tracks presence (a hot-plug bus) is asked. Any other bus never
-    takes a joint away once it has reported -- its start-up refuses to run
-    without every joint -- so there it is "has reported".
+    Every bus answers it (actuo.core.contracts.Bus.present): a hot-plug bus
+    from who answers now; any other never takes a joint away once it has
+    reported -- its start-up refuses to run without every joint.
     """
-    present = getattr(bus, "present", None)
-    if callable(present):
-        return bool(present(actuator.id))
-    return bus.last_state(actuator.id) is not None
+    return bool(bus.present(actuator.id))
 
 
 def _where(bus, actuator) -> str:
@@ -601,10 +598,7 @@ def _where(bus, actuator) -> str:
 
 def _absence_reason(bus, actuator) -> str:
     """`` (<why>)`` for a bus that can say why a servo reads absent."""
-    why = getattr(bus, "absence_reason", None)
-    if not callable(why):
-        return ""
-    reason = why(actuator.id)
+    reason = bus.absence_reason(actuator.id)
     return " ({})".format(reason) if reason else ""
 
 
@@ -954,7 +948,7 @@ def run_real(args):
             if not any(s is None or (s.position is None and needs_position[i])
                        for i, s in enumerate(states)):
                 break
-            if getattr(bus, "hot_plug", False) and all(
+            if bus.hot_plug and all(
                     bus.present(a.id) == (s is not None)
                     for a, s in zip(bus.actuators, states)):
                 # Every servo the bus calls present has reported; the rest
@@ -963,7 +957,7 @@ def run_real(args):
         # A hot-plug bus starts with whatever is plugged in: a configured
         # servo that never reported is ABSENT -- published as such, and its
         # module's hardware component refuses to activate -- not a failure.
-        hot_plug = bool(getattr(bus, "hot_plug", False))
+        hot_plug = bool(bus.hot_plug)
         if states is None and hot_plug:
             states = [None] * n
         if states is None:
