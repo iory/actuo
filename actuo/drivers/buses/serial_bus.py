@@ -20,10 +20,12 @@ from typing import Dict, List, Optional, Sequence
 
 from actuo.core.contracts import (
     ActuatorCommand, ActuatorState, Bus, OperatingMode)
+from actuo.core.registry import register_bus
 from actuo.drivers.actuators.feetech_scs import (
     REG_GOAL_POSITION, build_sync_write)
 
 
+@register_bus("serial_bus")
 class SerialBus(Bus):
     """Orchestrates a set of Feetech servos on one half-duplex serial line."""
 

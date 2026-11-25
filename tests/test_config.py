@@ -291,7 +291,7 @@ def test_build_sensors_instantiates_an_air_relay_board_from_config():
 
 def test_build_sensors_rejects_an_unknown_plugin():
     from actuo.drivers.config import build_sensors
-    with pytest.raises(KeyError, match="no config builder for sensor plugin"):
+    with pytest.raises(KeyError, match="unknown sensor .nope."):
         build_sensors([{"name": "x", "sensor": {"plugin": "nope", "id": 1}}])
 
 

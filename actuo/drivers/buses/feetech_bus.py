@@ -53,6 +53,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from actuo.core.contracts import (
     ActuatorCommand, ActuatorState, Bus, CapabilityError, Frame, OperatingMode)
+from actuo.core.registry import register_bus
 from actuo.core.diagnostics import DiagItem, DiagLevel
 from actuo.drivers import feetech_protocol as fp
 from actuo.drivers.buses.presence import (
@@ -89,6 +90,7 @@ def hls_homing_offset(raw: int, target: int, max_offset: int,
 DEFAULT_PROBE_TIMEOUT = 0.01
 
 
+@register_bus("feetech_bus")
 class FeetechBus(Bus):
     """Drives a set of :class:`FeetechStsActuator` on one serial line.
 

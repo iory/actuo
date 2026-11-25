@@ -38,6 +38,7 @@ from actuo.core.contracts import (
     OperatingMode,
     Transport,
 )
+from actuo.core.registry import register_bus
 from actuo.core.diagnostics import DiagItem, DiagLevel
 
 #: How often an actuator that must be armed is re-armed while commanded. At a
@@ -85,6 +86,7 @@ class StaleFeedbackError(RuntimeError):
     """
 
 
+@register_bus("can_bus")
 class CanBus(Bus):
     """Group CubeMars-style CAN actuators behind one transport.
 

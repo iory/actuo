@@ -132,7 +132,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from actuo.core.contracts import Actuator, Bus, Transport, require_presence
-from actuo.core.registry import get_actuator, get_transport
+from actuo.core.registry import get_actuator, get_bus, get_sensor, get_transport
+from actuo.core.registry import known as known_plugins
 
 # Each actuator family and bus is imported by the builder that uses it, not
 # here: a vendor's modules need that vendor's extra (``actuo[kondo]`` for
@@ -507,6 +508,8 @@ def _build_cubemars_v3(spec: Dict[str, Any], where: str) -> Actuator:
     return actuator
 
 
+#: Config readers of the actuator plugins actuo ships. A plugin from another
+#: package brings its own as ``from_config`` (see actuo.core.registry).
 _ACTUATOR_BUILDERS = {
     "cubemars": _build_cubemars,
     "cubemars_mit": _build_cubemars_mit,
@@ -517,6 +520,25 @@ _ACTUATOR_BUILDERS = {
     "kondo_ics": _build_kondo_ics,
     "kondo_ics_wheel": _build_kondo_ics_wheel,
 }
+
+
+def _config_reader(kind: str, plugin: str, shipped: Dict[str, Any]):
+    """The function turning a config block into a ``kind`` plugin instance.
+
+    A shipped plugin's reader is in this module; any other plugin is looked up
+    in the registry (its decorator or its package's entry point) and must
+    carry a ``from_config`` classmethod.
+    """
+    if plugin in shipped:
+        return shipped[plugin]
+    cls = get_actuator(plugin) if kind == "actuator" else get_sensor(plugin)
+    reader = getattr(cls, "from_config", None)
+    if not callable(reader):
+        raise TypeError(
+            "{} plugin {!r} ({}.{}) has no from_config(spec, where) classmethod, "
+            "so a robot config cannot build it".format(
+                kind, plugin, cls.__module__, cls.__qualname__))
+    return reader
 
 
 def build_actuators(joints: List[Dict[str, Any]]) -> Tuple[List[Actuator], List[str]]:
@@ -534,13 +556,8 @@ def build_actuators(joints: List[Dict[str, Any]]) -> Tuple[List[Actuator], List[
         plugin = spec.pop("plugin", None)
         if plugin is None:
             raise KeyError("{}.actuator: missing required key 'plugin'".format(where))
-        if plugin not in _ACTUATOR_BUILDERS:
-            raise KeyError(
-                "no config builder for actuator plugin {!r}; known: {}".format(
-                    plugin, sorted(_ACTUATOR_BUILDERS)
-                )
-            )
-        actuators.append(_ACTUATOR_BUILDERS[plugin](spec, "{}.actuator".format(where)))
+        builder = _config_reader("actuator", plugin, _ACTUATOR_BUILDERS)
+        actuators.append(builder(spec, "{}.actuator".format(where)))
         names.append(name)
 
     duplicates = {n for n in names if names.count(n) > 1}
@@ -589,13 +606,10 @@ def build_sensors(sensors: "List[Dict[str, Any]] | None"):
         plugin = spec.pop("plugin", None)
         if plugin is None:
             raise KeyError("{}.sensor: missing required key 'plugin'".format(where))
-        if plugin not in _SENSOR_BUILDERS:
-            raise KeyError(
-                "no config builder for sensor plugin {!r}; known: {}".format(
-                    plugin, sorted(_SENSOR_BUILDERS)))
+        builder = _config_reader("sensor", plugin, _SENSOR_BUILDERS)
         if name in names:
             raise ValueError("duplicate sensor name in config: {!r}".format(name))
-        out.append((name, _SENSOR_BUILDERS[plugin](spec, "{}.sensor".format(where))))
+        out.append((name, builder(spec, "{}.sensor".format(where))))
         names.append(name)
     return out
 
@@ -763,27 +777,6 @@ def joints_with_servo_map(document: Dict[str, Any], path: str
     return out
 
 
-#: Bus plugin -> (module, class), imported only when a config names it.
-_BUS_CLASSES = {
-    "can_bus": ("actuo.drivers.buses.can_bus", "CanBus"),
-    "dynamixel_bus": ("actuo.drivers.buses.dynamixel_bus", "DynamixelBus"),
-    "feetech_bus": ("actuo.drivers.buses.feetech_bus", "FeetechBus"),
-    "kondo_h7_bus": ("actuo.drivers.buses.kondo_h7_bus", "KondoH7Bus"),
-    "kondo_rcb4_bus": ("actuo.drivers.buses.kondo_rcb4_bus", "KondoRcb4Bus"),
-    "serial_bus": ("actuo.drivers.buses.serial_bus", "SerialBus"),
-}
-
-
-def _bus_class(bus_plugin: str) -> type:
-    import importlib
-
-    if bus_plugin not in _BUS_CLASSES:
-        raise KeyError("unknown bus plugin {!r}; known: {}".format(
-            bus_plugin, ", ".join(sorted(_BUS_CLASSES))))
-    module, name = _BUS_CLASSES[bus_plugin]
-    return getattr(importlib.import_module(module), name)
-
-
 def build_bus(
     path: str, transport_overrides: "Dict[str, Any] | None" = None,
     bus_overrides: "Dict[str, Any] | None" = None,
@@ -820,24 +813,11 @@ def build_bus(
     # symptom of disagreement is a silent bus.
     actuators, names = build_actuators(joints_with_servo_map(document, path))
 
-    # Which orchestration layer drives this transport. Defaults from the
-    # transport family (serial => Feetech request/response bus, otherwise the
-    # CAN streaming bus), overridable via ``bus.plugin`` for an explicit choice.
+    # Which orchestration layer drives this transport: ``bus.plugin``, or else
+    # what the actuators and the transport class say (_default_bus).
     bus_plugin = bus_spec.get("plugin")
     if bus_plugin is None:
-        transport_plugin = transport_spec.get("plugin")
-        bus_plugin = {"serial": "serial_bus",
-                      "kondo_h7": "kondo_h7_bus",
-                      "kondo_rcb4": "kondo_rcb4_bus"}.get(transport_plugin, "can_bus")
-        from actuo.drivers.actuators.dynamixel import DynamixelActuator
-        if bus_plugin == "serial_bus" and all(
-                isinstance(a, DynamixelActuator) for a in actuators):
-            bus_plugin = "dynamixel_bus"
-        if bus_plugin == "serial_bus" and all(
-                type(a).__name__ == "FeetechStsActuator" for a in actuators):
-            # By name: importing the class needs feetech-cli, which a robot
-            # without these servos does not have.
-            bus_plugin = "feetech_bus"
+        bus_plugin = _default_bus(transport_spec, actuators, path)
 
     if bus_plugin == "dynamixel_bus" and transport_spec.get("plugin") == "serial":
         protocols = {a.protocol for a in actuators}
@@ -864,96 +844,142 @@ def build_bus(
     # its transport is opened, rather than ignoring the keys.
     hot_plug = bool(bus_spec.get("hot_plug", False))
     watch_ids = tuple(int(i) for i in bus_spec.get("watch_ids", ()))
-    require_presence(_bus_class(bus_plugin), hot_plug, watch_ids)
+    bus_cls = get_bus(bus_plugin)
+    if bus_plugin in _BUS_BUILDERS:
+        bus_builder = _BUS_BUILDERS[bus_plugin]
+    else:
+        bus_builder = getattr(bus_cls, "from_config", None)
+        if not callable(bus_builder):
+            raise TypeError(
+                "bus plugin {!r} ({}.{}) has no from_config(transport, actuators, "
+                "joint_names, spec, path) classmethod, so a robot config cannot "
+                "build it".format(bus_plugin, bus_cls.__module__, bus_cls.__qualname__))
+    require_presence(bus_cls, hot_plug, watch_ids)
 
     transport = build_transport(transport_spec)
-    if bus_plugin == "kondo_h7_bus":
-        from actuo.drivers.buses.kondo_h7_bus import DEFAULT_STATE_SLOTS, KondoH7Bus
-        from actuo.drivers.kondo_h7_protocol import load_symbol_map
-        symbols_path = resolve_data_path(
-            str(_require(bus_spec, "symbols", "bus")), path, "bus.symbols")
-        bus: Bus = KondoH7Bus(
-            transport, actuators, load_symbol_map(symbols_path),
-            state_slots=tuple(bus_spec.get("state_slots", DEFAULT_STATE_SLOTS)),
-            move_time_ms=bus_spec.get("move_time_ms"),
-            read_timeout=float(bus_spec.get("read_timeout", 0.1)),
-            joint_names=names,
-            battery_voltage_warn_below=bus_spec.get("battery_voltage_warn_below"))
-    elif bus_plugin == "kondo_rcb4_bus":
-        from actuo.drivers.buses.kondo_rcb4_bus import (
-            DEFAULT_ABSENT_TIMEOUT_S, DEFAULT_CONNECT_BITRATES, DEFAULT_NAK_RETRIES,
-            DEFAULT_PRESENCE_PERIOD,
-            DEFAULT_READING_CONFIRM as RCB4_DEFAULT_READING_CONFIRM,
-            DEFAULT_READING_JUMP_RAD as RCB4_DEFAULT_READING_JUMP_RAD,
-            DEFAULT_STATE_SLOTS as RCB4_DEFAULT_STATE_SLOTS, KondoRcb4Bus)
-        bus = KondoRcb4Bus(
-            transport, actuators,
-            state_slots=tuple(bus_spec.get("state_slots", RCB4_DEFAULT_STATE_SLOTS)),
-            move_time_ms=bus_spec.get("move_time_ms"),
-            read_timeout=float(bus_spec.get("read_timeout", 0.1)),
-            joint_names=names,
-            ics_bitrate=int(bus_spec.get("ics_bitrate", 1250000)),
-            connect_bitrates=tuple(
-                bus_spec.get("connect_bitrates", DEFAULT_CONNECT_BITRATES)),
-            nak_retries=int(bus_spec.get("nak_retries", DEFAULT_NAK_RETRIES)),
-            battery_voltage_warn_below=bus_spec.get("battery_voltage_warn_below"),
-            hot_plug=hot_plug,
-            watch_ids=watch_ids,
-            presence_period=int(bus_spec.get("presence_period",
-                                             DEFAULT_PRESENCE_PERIOD)),
-            absent_timeout_s=float(bus_spec.get("absent_timeout_s",
-                                                DEFAULT_ABSENT_TIMEOUT_S)),
-            port_detect=bool(bus_spec.get("port_detect", False)),
-            reading_jump_rad=bus_spec.get("reading_jump_rad",
-                                          RCB4_DEFAULT_READING_JUMP_RAD),
-            reading_confirm=int(bus_spec.get("reading_confirm",
-                                             RCB4_DEFAULT_READING_CONFIRM)))
-    elif bus_plugin == "serial_bus":
-        from actuo.drivers.buses.serial_bus import SerialBus
-        bus = SerialBus(
-            transport, actuators,
-            read_timeout=float(bus_spec.get("read_timeout", 0.05)))
-    elif bus_plugin == "feetech_bus":
-        from actuo.drivers.buses.feetech_bus import (
-            DEFAULT_ABSENT_AFTER_MISSES as FEETECH_DEFAULT_ABSENT_AFTER_MISSES,
-            DEFAULT_PRESENCE_PERIOD as FEETECH_DEFAULT_PRESENCE_PERIOD,
-            DEFAULT_PROBE_TIMEOUT as FEETECH_DEFAULT_PROBE_TIMEOUT, FeetechBus)
-        bus = FeetechBus(
-            transport, actuators,
-            read_timeout=float(bus_spec.get("read_timeout", 0.05)),
-            use_sync_read=bool(bus_spec.get("use_sync_read", True)),
-            reset_torque_limit=bool(bus_spec.get("reset_torque_limit", True)),
-            hot_plug=hot_plug,
-            absent_after_misses=int(bus_spec.get(
-                "absent_after_misses", FEETECH_DEFAULT_ABSENT_AFTER_MISSES)),
-            presence_period=int(bus_spec.get(
-                "presence_period", FEETECH_DEFAULT_PRESENCE_PERIOD)),
-            probe_timeout=float(bus_spec.get(
-                "probe_timeout", FEETECH_DEFAULT_PROBE_TIMEOUT)),
-            watch_ids=watch_ids)
-    elif bus_plugin == "dynamixel_bus":
-        from actuo.drivers.buses.dynamixel_bus import DynamixelBus
-        from actuo.drivers.buses.presence import (
-            DEFAULT_ABSENT_AFTER_MISSES, DEFAULT_PRESENCE_PERIOD as PRESENCE_PERIOD)
-        bus = DynamixelBus(
-            transport, actuators,
-            read_timeout=float(bus_spec.get("read_timeout", 0.05)),
-            use_sync_read=bool(bus_spec.get("use_sync_read", True)),
-            silence_error_misses=int(bus_spec.get("silence_error_misses", 10)),
-            silence_error_age_s=float(bus_spec.get("silence_error_age_s", 1.0)),
-            hot_plug=hot_plug,
-            absent_after_misses=int(bus_spec.get(
-                "absent_after_misses", DEFAULT_ABSENT_AFTER_MISSES)),
-            presence_period=int(bus_spec.get("presence_period", PRESENCE_PERIOD)),
-            probe_timeout=float(bus_spec.get("probe_timeout", 0.01)),
-            watch_ids=watch_ids)
-    elif bus_plugin == "can_bus":
-        from actuo.drivers.buses.can_bus import CanBus
-        bus = CanBus(
-            transport, actuators,
-            stale_after=float(bus_spec.get("stale_after", 1.0)),
-            hot_plug=hot_plug,
-            watch_ids=watch_ids)
-    else:                                  # _bus_class refused it above
-        raise KeyError("unknown bus plugin {!r}".format(bus_plugin))
-    return bus, names
+    bus_spec["hot_plug"] = hot_plug
+    bus_spec["watch_ids"] = watch_ids
+    return bus_builder(transport, actuators, names, bus_spec, path), names
+
+
+def _default_bus(transport_spec: Dict[str, Any], actuators: List[Actuator],
+                 path: str) -> str:
+    """The bus plugin for a config that names none.
+
+    Every actuator naming the same ``preferred_bus`` wins (a DYNAMIXEL or
+    FEETECH servo on the plain ``serial`` transport); otherwise the transport
+    class's ``default_bus``.
+    """
+    preferred = {getattr(a, "preferred_bus", None) for a in actuators}
+    if len(preferred) == 1 and None not in preferred:
+        return preferred.pop()
+    transport_plugin = transport_spec.get("plugin")
+    if transport_plugin is None:
+        raise KeyError("bus.transport: missing required key 'plugin'")
+    default = get_transport(transport_plugin).default_bus
+    if default is None:
+        raise KeyError(
+            "{}: transport {!r} names no default bus; set bus.plugin (known: {})".format(
+                path, transport_plugin, known_plugins("bus")))
+    return default
+
+
+def _build_kondo_h7_bus(transport, actuators, names, spec, path) -> Bus:
+    from actuo.drivers.buses.kondo_h7_bus import DEFAULT_STATE_SLOTS, KondoH7Bus
+    from actuo.drivers.kondo_h7_protocol import load_symbol_map
+    symbols_path = resolve_data_path(
+        str(_require(spec, "symbols", "bus")), path, "bus.symbols")
+    return KondoH7Bus(
+        transport, actuators, load_symbol_map(symbols_path),
+        state_slots=tuple(spec.get("state_slots", DEFAULT_STATE_SLOTS)),
+        move_time_ms=spec.get("move_time_ms"),
+        read_timeout=float(spec.get("read_timeout", 0.1)),
+        joint_names=names,
+        battery_voltage_warn_below=spec.get("battery_voltage_warn_below"))
+
+
+def _build_kondo_rcb4_bus(transport, actuators, names, spec, path) -> Bus:
+    from actuo.drivers.buses.kondo_rcb4_bus import (
+        DEFAULT_ABSENT_TIMEOUT_S, DEFAULT_CONNECT_BITRATES, DEFAULT_NAK_RETRIES,
+        DEFAULT_PRESENCE_PERIOD, DEFAULT_READING_CONFIRM, DEFAULT_READING_JUMP_RAD,
+        DEFAULT_STATE_SLOTS, KondoRcb4Bus)
+    return KondoRcb4Bus(
+        transport, actuators,
+        state_slots=tuple(spec.get("state_slots", DEFAULT_STATE_SLOTS)),
+        move_time_ms=spec.get("move_time_ms"),
+        read_timeout=float(spec.get("read_timeout", 0.1)),
+        joint_names=names,
+        ics_bitrate=int(spec.get("ics_bitrate", 1250000)),
+        connect_bitrates=tuple(spec.get("connect_bitrates", DEFAULT_CONNECT_BITRATES)),
+        nak_retries=int(spec.get("nak_retries", DEFAULT_NAK_RETRIES)),
+        battery_voltage_warn_below=spec.get("battery_voltage_warn_below"),
+        hot_plug=spec["hot_plug"],
+        watch_ids=spec["watch_ids"],
+        presence_period=int(spec.get("presence_period", DEFAULT_PRESENCE_PERIOD)),
+        absent_timeout_s=float(spec.get("absent_timeout_s", DEFAULT_ABSENT_TIMEOUT_S)),
+        port_detect=bool(spec.get("port_detect", False)),
+        reading_jump_rad=spec.get("reading_jump_rad", DEFAULT_READING_JUMP_RAD),
+        reading_confirm=int(spec.get("reading_confirm", DEFAULT_READING_CONFIRM)))
+
+
+def _build_serial_bus(transport, actuators, names, spec, path) -> Bus:
+    from actuo.drivers.buses.serial_bus import SerialBus
+    return SerialBus(transport, actuators,
+                     read_timeout=float(spec.get("read_timeout", 0.05)))
+
+
+def _build_feetech_bus(transport, actuators, names, spec, path) -> Bus:
+    from actuo.drivers.buses.feetech_bus import (
+        DEFAULT_ABSENT_AFTER_MISSES, DEFAULT_PRESENCE_PERIOD, DEFAULT_PROBE_TIMEOUT,
+        FeetechBus)
+    return FeetechBus(
+        transport, actuators,
+        read_timeout=float(spec.get("read_timeout", 0.05)),
+        use_sync_read=bool(spec.get("use_sync_read", True)),
+        reset_torque_limit=bool(spec.get("reset_torque_limit", True)),
+        hot_plug=spec["hot_plug"],
+        absent_after_misses=int(spec.get("absent_after_misses",
+                                         DEFAULT_ABSENT_AFTER_MISSES)),
+        presence_period=int(spec.get("presence_period", DEFAULT_PRESENCE_PERIOD)),
+        probe_timeout=float(spec.get("probe_timeout", DEFAULT_PROBE_TIMEOUT)),
+        watch_ids=spec["watch_ids"])
+
+
+def _build_dynamixel_bus(transport, actuators, names, spec, path) -> Bus:
+    from actuo.drivers.buses.dynamixel_bus import DynamixelBus
+    from actuo.drivers.buses.presence import (
+        DEFAULT_ABSENT_AFTER_MISSES, DEFAULT_PRESENCE_PERIOD)
+    return DynamixelBus(
+        transport, actuators,
+        read_timeout=float(spec.get("read_timeout", 0.05)),
+        use_sync_read=bool(spec.get("use_sync_read", True)),
+        silence_error_misses=int(spec.get("silence_error_misses", 10)),
+        silence_error_age_s=float(spec.get("silence_error_age_s", 1.0)),
+        hot_plug=spec["hot_plug"],
+        absent_after_misses=int(spec.get("absent_after_misses",
+                                         DEFAULT_ABSENT_AFTER_MISSES)),
+        presence_period=int(spec.get("presence_period", DEFAULT_PRESENCE_PERIOD)),
+        probe_timeout=float(spec.get("probe_timeout", 0.01)),
+        watch_ids=spec["watch_ids"])
+
+
+def _build_can_bus(transport, actuators, names, spec, path) -> Bus:
+    from actuo.drivers.buses.can_bus import CanBus
+    return CanBus(transport, actuators,
+                  stale_after=float(spec.get("stale_after", 1.0)),
+                  hot_plug=spec["hot_plug"],
+                  watch_ids=spec["watch_ids"])
+
+
+#: Config readers of the bus plugins actuo ships, with the signature a plugin
+#: from another package gives its ``from_config``: (transport, actuators,
+#: joint_names, spec, path). ``spec`` is the ``bus:`` block with ``hot_plug``
+#: and ``watch_ids`` already normalized (bool, tuple of int).
+_BUS_BUILDERS = {
+    "can_bus": _build_can_bus,
+    "dynamixel_bus": _build_dynamixel_bus,
+    "feetech_bus": _build_feetech_bus,
+    "kondo_h7_bus": _build_kondo_h7_bus,
+    "kondo_rcb4_bus": _build_kondo_rcb4_bus,
+    "serial_bus": _build_serial_bus,
+}

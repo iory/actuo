@@ -25,18 +25,23 @@ from actuo.core.contracts import (
 )
 from actuo.core.diagnostics import DiagItem, DiagLevel, fold_diag_level
 from actuo.core.registry import (
+    ENTRY_POINT_GROUPS,
     get_actuator,
+    get_bus,
     get_sensor,
     get_transport,
     register_actuator,
+    register_bus,
     register_sensor,
     register_transport,
     registered_actuators,
+    registered_buses,
     registered_sensors,
     registered_transports,
 )
 
 __all__ = [
+    "ENTRY_POINT_GROUPS",
     "Actuator",
     "ActuatorCommand",
     "ActuatorId",
@@ -58,12 +63,15 @@ __all__ = [
     "Transport",
     "fold_diag_level",
     "get_actuator",
+    "get_bus",
     "get_sensor",
     "get_transport",
     "register_actuator",
+    "register_bus",
     "register_sensor",
     "register_transport",
     "registered_actuators",
+    "registered_buses",
     "registered_sensors",
     "registered_transports",
 ]

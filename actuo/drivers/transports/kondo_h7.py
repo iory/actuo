@@ -49,6 +49,8 @@ class KondoH7Transport(Transport):
         Default per-packet read timeout in seconds.
     """
 
+    default_bus = "kondo_h7_bus"
+
     def __init__(self, channel: str, bitrate: int = DEFAULT_BITRATE,
                  timeout: float = 0.1) -> None:
         self.channel = channel

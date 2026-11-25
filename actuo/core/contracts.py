@@ -188,6 +188,10 @@ class Transport(abc.ABC):
     fixed-length synchronous reply.
     """
 
+    #: The bus plugin that drives this transport when a robot config names no
+    #: ``bus.plugin`` (see :mod:`actuo.core.registry`). None: the config must.
+    default_bus: Optional[str] = None
+
     @abc.abstractmethod
     def open(self) -> None: ...
 
@@ -291,6 +295,12 @@ class Actuator(Device):
     #: watches them go stale and reports a fault about hardware that is healthy
     #: and waiting to be asked. See CanBus.solicit.
     answers_only_when_addressed: bool = False
+
+    #: The bus plugin made for this model. When every actuator of a config
+    #: names the same one and the config names no ``bus.plugin``, it is used
+    #: instead of the transport's ``default_bus`` (a DYNAMIXEL or FEETECH
+    #: servo on the plain ``serial`` transport).
+    preferred_bus: Optional[str] = None
 
     def __init__(self, actuator_id: DeviceId, calibration: "Calibration") -> None:
         super().__init__(actuator_id, calibration)

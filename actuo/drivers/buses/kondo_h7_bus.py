@@ -31,6 +31,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from actuo.core.contracts import (
     ActuatorCommand, ActuatorState, Bus, Frame, OperatingMode)
+from actuo.core.registry import register_bus
 from actuo.core.diagnostics import DiagItem, DiagLevel
 
 from actuo.drivers.actuators.kondo_ics import (
@@ -92,6 +93,7 @@ def compare_discovery(discovery: KondoDiscovery,
     return missing, unexpected, timed_out
 
 
+@register_bus("kondo_h7_bus")
 class KondoH7Bus(Bus):
     """Drives a set of :class:`KondoIcsActuator` through one H7 board.
 

@@ -73,6 +73,8 @@ class KondoRcb4UdpTransport(Transport):
         loss, "board did not answer a 20-byte read at 0x016c").
     """
 
+    default_bus = "kondo_rcb4_bus"
+
     def __init__(self, channel: str, bitrate: int = 115200,
                  timeout: float = 0.1, network_timeout: float = 0.05,
                  failsafe_silence: float = 0.5, retries: int = 2) -> None:

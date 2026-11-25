@@ -72,6 +72,8 @@ class SerialTransport(Transport):
         ``actuo-dxl-probe`` reports whether the adapter needs it.
     """
 
+    default_bus = "serial_bus"
+
     def __init__(self, channel: str, bitrate: int = 1_000_000,
                  timeout: float = 0.05, protocol: int = 1,
                  discard_echo: bool = False) -> None:

@@ -170,6 +170,8 @@ class FeetechStsActuator(Actuator):
         From the robot config; checked against the servo's model_number.
     """
 
+    preferred_bus = "feetech_bus"
+
     answers_only_when_addressed = True
 
     def __init__(self, actuator_id: int, calibration: FeetechStsCalibration,
