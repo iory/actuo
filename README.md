@@ -150,9 +150,13 @@ replies are cut while its commands still arrive is detached and comes back.
 On 2026-11-24 they passed on `examples/rigs/feetech_4port` (two STS3215, two
 HLS3950M, 1 Mbit/s): 16 combinations x 2 descriptions in about 20 s.
 On `examples/rigs/krs_4port` (four KRS servos on an RCB-4mini, 2026-11-25)
-`tests/hardware/test_modular_hw.py` passed 3 runs of 4: the fourth failed
-because the KRS servos sometimes do not answer after their power is switched
-on again, and stay silent until the next power cycle.
+both tests and `tests/hardware/test_modular_hw.py` passed (4 runs of 4) once
+the injector connected each port's signal 1 s after its power
+(`signal_after_s`). Without that, a KRS powered with its signal on the live
+ICS line sometimes started in PWM mode (the line's level during the first
+500 ms selects the mode; the board's 10k pull-ups R17-R47 are not fitted):
+it no longer answers, was found near an end stop afterwards (pulse 11400-12001),
+and blocks the other servos' replies until it is powered off.
 
 ## With ROS 2: the servicer and shared memory
 
