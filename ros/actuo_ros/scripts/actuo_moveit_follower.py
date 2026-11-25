@@ -118,11 +118,18 @@ class MoveItFollower(Node):
                                        time.monotonic() - t0 - stopped))
 
     def stop(self):
-        """Stop the running move_group, if any."""
+        """Stop the running move_group, if any.
+
+        Also at shutdown, after rclpy's signal handler has shut the context
+        down: publishing then raises, so it is only done while the context is
+        up, and never before the move_group is stopped (a publish that raised
+        first left move_group running after the launch had ended).
+        """
         if self.process is None:
             return
-        self.ready_pub.publish(String(data=""))
         self.running = None
+        if self.context.ok():
+            self.ready_pub.publish(String(data=""))
         try:
             os.killpg(self.process.pid, signal.SIGINT)
             self.process.wait(timeout=STOP_TIMEOUT)
@@ -134,7 +141,8 @@ class MoveItFollower(Node):
         self.process = None
         # Its services go with it; wait until the name is free for the next one.
         deadline = time.monotonic() + STOP_TIMEOUT
-        while self.plan_cli.service_is_ready() and time.monotonic() < deadline:
+        while (self.context.ok() and self.plan_cli.service_is_ready()
+               and time.monotonic() < deadline):
             time.sleep(0.02)
 
 
