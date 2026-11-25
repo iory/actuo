@@ -1,0 +1,18 @@
+# ICS IDs 1-4 on the RCB-4mini's SIO5-8 side: ICS numbers 3, 5, 7, 9
+# (see ../robot.yaml).
+bus:
+  plugin: kondo_rcb4_bus
+  transport:
+    plugin: kondo_rcb4
+    channel: /dev/serial/by-id/usb-Kondo_Kagaku_DUAL_USB_ADAPTER_HS_KOUSBCNV-if00-port0
+    bitrate: 1250000
+  ics_bitrate: 1250000
+  hot_plug: true
+urdf: ../../feetech_4port/modular/gripper.urdf
+modules:
+  arm: {joints: [arm_shoulder, arm_elbow]}
+  hand: {gripper: [gripper_finger]}
+joints:
+  - {name: arm_shoulder, actuator: {plugin: kondo_ics, id: 3}}
+  - {name: arm_elbow, actuator: {plugin: kondo_ics, id: 5}}
+  - {name: gripper_finger, actuator: {plugin: kondo_ics, id: 7}}

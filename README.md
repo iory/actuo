@@ -149,6 +149,10 @@ the same problems, as from the combination itself; and that a joint whose
 replies are cut while its commands still arrive is detached and comes back.
 On 2026-11-24 they passed on `examples/rigs/feetech_4port` (two STS3215, two
 HLS3950M, 1 Mbit/s): 16 combinations x 2 descriptions in about 20 s.
+On `examples/rigs/krs_4port` (four KRS servos on an RCB-4mini, 2026-11-25)
+`tests/hardware/test_modular_hw.py` passed 3 runs of 4: the fourth failed
+because the KRS servos sometimes do not answer after their power is switched
+on again, and stay silent until the next power cycle.
 
 ## With ROS 2: the servicer and shared memory
 

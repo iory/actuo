@@ -22,8 +22,12 @@ pytestmark = [
 ]
 
 SETTLE = 8.0
-#: Raw counts a held servo may drift across a switch (encoder noise).
-HELD_COUNTS = 3
+#: Raw reading -> how far a held servo may drift across a switch. FEETECH
+#: counts: encoder noise, about 0.26 deg. Kondo ICS pulses, about 0.54 deg: a
+#: KRS switched on from limp settled 10 pulses off its target and onto it when
+#: the next configuration wrote the same target again (6239 -> 6229 with 6229
+#: commanded throughout, 2026-11-25).
+HELD_RAW = {"raw_position": 3, "pulse": 16}
 
 
 @pytest.fixture(scope="module")
@@ -50,8 +54,20 @@ def _wait(cond, timeout=SETTLE):
 
 
 def _raw(mr, servo_id):
+    """``(key, value)`` of a servo's raw reading (calibration-free, so it can
+    be compared across configurations), or ``None``."""
     state = mr.ri.bus.last_state(servo_id)
-    return None if state is None else state.aux.get("raw_position")
+    if state is None:
+        return None
+    for key in HELD_RAW:
+        if key in state.aux:
+            return key, state.aux[key]
+    return None
+
+
+def _drifted(before, after):
+    return (before is None or after is None or before[0] != after[0]
+            or abs(after[1] - before[1]) > HELD_RAW[before[0]])
 
 
 def test_each_configuration_is_detected_and_shared_servos_keep_their_torque(rig):
@@ -90,8 +106,7 @@ def test_each_configuration_is_detected_and_shared_servos_keep_their_torque(rig)
                     name, held_after, expected))
             time.sleep(0.3)
             moved = {i: (raw_before[i], _raw(mr, i)) for i in shared
-                     if raw_before[i] is None or _raw(mr, i) is None
-                     or abs(_raw(mr, i) - raw_before[i]) > HELD_COUNTS}
+                     if _drifted(raw_before[i], _raw(mr, i))}
             if moved:
                 failures.append("{}: held servos moved {}".format(name, moved))
             mr.ri.servo_off()

@@ -85,7 +85,7 @@ from actuo.core.contracts import (
 from actuo.core.diagnostics import DiagItem, DiagLevel
 
 from actuo.drivers.actuators.kondo_ics import (
-    CENTER_PULSE, PULSE_PER_DEG, SERVO_OFF_PULSE, SERVO_ON_PULSE)
+    CENTER_PULSE, PULSE_PER_DEG, SERVO_OFF_PULSE)
 from rcb4.protocol.rcb4mini import (
     BATTERY_ADC_ADDRESS, BATTERY_VOLTS_PER_COUNT, CONFIG_ADDRESS, CONFIG_RUN_ROM,
     CONFIG_SERVO_RESPONSE, CONFIG_VECTOR_JUMP, FIRMWARE_VERSION_REPLY,
@@ -309,6 +309,9 @@ class KondoRcb4Bus(Bus):
         self._rewritten: Dict[int, bool] = {}
         # ICS number -> when a nonzero pulse was last read / why it went absent.
         self._last_rewrite: Dict[int, float] = {}
+        # ICS number -> last nonzero pulse read: where a servo switched on
+        # holds (_turn_on), never the record's field itself.
+        self._measured_pulse: Dict[int, int] = {}
         self._absent_why: Dict[int, str] = {}
         self._present: Dict[int, bool] = {}
         self._reads_since_check = 0
@@ -637,9 +640,9 @@ class KondoRcb4Bus(Bus):
         in the same packet, as on the H7.
 
         A servo that was released and now gets a target is first switched on
-        where it stands (``SERVO_ON_PULSE``) in a packet of its own: from the
-        OFF reference this board never interpolates toward a target, so the
-        servo would stay limp (measured, see references.md).
+        where it stands (:meth:`_turn_on`): from the OFF reference this board
+        never interpolates toward a target, so the servo would stay limp
+        (measured, see references.md).
 
         A WHEEL is switched on differently, because ``SERVO_ON_PULSE`` copies
         the measured pulse into the reference, and a wheel reads its reference
@@ -676,7 +679,7 @@ class KondoRcb4Bus(Bus):
                 if getattr(actuator, "expects_rotation", False):
                     self._stop_wheel(slot)
                 else:
-                    turning_on.append(slot)
+                    turning_on.append((slot, actuator, targets[slot]))
         ids = list(targets)
         pulses = list(targets.values())
         if not ids:
@@ -689,12 +692,8 @@ class KondoRcb4Bus(Bus):
                 "driven with one move byte for every servo. Give every "
                 "joint the same `velocity`, or set move_time_ms.".format(
                     dict(zip(self._ids, velocities))))
-        if turning_on:
-            self._command(build_multi_servo(
-                ids,
-                [SERVO_ON_PULSE if slot in turning_on else pulse
-                 for slot, pulse in zip(ids, pulses)],
-                velocities[0]))
+        for slot, actuator, target in turning_on:
+            self._turn_on(slot, actuator, target)
         self._command(build_multi_servo(ids, pulses, velocities[0]))
         self._servo_on.update(driven)
 
@@ -849,6 +848,9 @@ class KondoRcb4Bus(Bus):
                 address, data, self._polled(), self.state_slots))
         if raw:
             self._state_updates += 1
+        for slot, values in raw.items():
+            if values.get("current_angle"):
+                self._measured_pulse[slot] = int(values["current_angle"])
 
         tracked = self._tracked()
         if tracked:
@@ -866,6 +868,7 @@ class KondoRcb4Bus(Bus):
                         if self._present.get(slot):
                             self._absent_why[slot] = self._why_absent(slot, now)
                         self._present[slot] = False
+                        self._measured_pulse.pop(slot, None)
                         # Unplugged, it loses the stretch it was set to.
                         self._stretch_set.discard(slot)
                     del raw[slot]
@@ -1076,14 +1079,55 @@ class KondoRcb4Bus(Bus):
                   if getattr(a, "expects_rotation", False)} & held
         for slot in wheels:
             self._stop_wheel(slot)
+        actuator_of = {self._drive_slot(a.id): a for a in self.actuators}
+        # Held where it stands means at its last reading: without one (or
+        # with one the servo cannot be commanded to) there is nowhere to hold
+        # it, and it stays OFF.
+        holding = {slot: self._hold_pulse(slot, actuator_of[slot])
+                   for slot in held - wheels}
+        holding = {slot: pulse for slot, pulse in holding.items() if pulse is not None}
+        for slot, pulse in holding.items():
+            self._turn_on(slot, actuator_of[slot], pulse)
         self._command(build_multi_servo(
             self._slots,
             [CENTER_PULSE if slot in wheels
-             else SERVO_ON_PULSE if slot in held else SERVO_OFF_PULSE
+             else holding.get(slot, SERVO_OFF_PULSE)
              for slot in self._slots],
             self._velocity_for(self.actuators[0])))
         for servo_id, slot in driven.items():
-            self._servo_on[servo_id] = slot is not None
+            self._servo_on[servo_id] = slot in wheels or slot in holding
+
+    def _hold_pulse(self, slot: int, actuator) -> Optional[int]:
+        """The servo's last reading, if it is one the servo can be commanded
+        to; else ``None``."""
+        pulse = self._measured_pulse.get(slot)
+        low, high = actuator.calibration.pulse_limit
+        if pulse is None or not low <= pulse <= high:
+            return None
+        return pulse
+
+    def _turn_on(self, slot: int, actuator, target: int) -> None:
+        """Switch a released servo on: its record's reference := where it holds.
+
+        Not ``SERVO_ON_PULSE``: the board answers that by copying the record's
+        measured pulse into the reference, and that field is the one the
+        presence check zeroes (:meth:`_clear_pulses`). Switched on between a
+        clear and the board's rewrite, the reference became 0 and the servo
+        drove to its end stop (two KRS servos went to pulse ~3500 handing a
+        held joint across a configuration switch, 2026-11-25). A servo
+        resting beyond its envelope got that pulse copied as is and stopped
+        answering (a KRS at pulse 12001, same day).
+
+        The reference is the servo's last reading when that is one it can be
+        commanded to, so the batch that follows interpolates from where it
+        stands; otherwise ``target``, which the caller already checked against
+        the servo's envelope and the supervisor approved, so the servo goes
+        straight there. Writing ``+6`` drives the servo to it
+        (references.md).
+        """
+        pulse = self._hold_pulse(slot, actuator)
+        self._write_ram(servo_record_address(slot) + _REFERENCE_OFFSET,
+                        struct.pack("<H", target if pulse is None else pulse))
 
     def _stop_wheel(self, slot: int) -> None:
         """Switch a wheel on at standstill: its record's reference := stop.
