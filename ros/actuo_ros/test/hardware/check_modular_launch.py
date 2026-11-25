@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""Hardware check: modular.launch.py on examples/rigs/feetech_4port, end to end.
+"""Hardware check: modular.launch.py on a four-port rig, end to end.
 
 Not collected by pytest or colcon test (its name does not start with test_):
 run it by hand, on the rig, while the launch runs on its own ROS domain::
 
     export ROS_DOMAIN_ID=73          # not the domain another robot's stack uses
+    export ACTUO_RIG=examples/rigs/feetech_4port/rig.yaml    # or krs_4port
     # board: PORT 1-3 powered, PORT 4 off (the gripper configuration)
     ros2 launch actuo_ros modular.launch.py \\
         catalog:=examples/rigs/feetech_4port/modular/catalog.yaml &
     python3 ros/actuo_ros/test/hardware/check_modular_launch.py
+
+The rig's catalog must be the gripper / drill pair of the example rigs: PORT 3
+the gripper's servo, PORT 4 the drill's, PORT 1 and 2 shared, with their joint
+names. The injector is the rig file's (``ACTUO_RIG``, default feetech_4port), so
+its settings (``signal_after_s`` for KRS) apply.
 
 Checks, through the servicer, the configuration manager and controller_manager:
 both gripper modules come up; pulling id 3 takes only the hand down and
@@ -34,7 +40,9 @@ from controller_manager_msgs.srv import ListControllers  # noqa: E402
 from actuo_msgs.action import SetServo  # noqa: E402
 from actuo_msgs.msg import Configuration, ServoState  # noqa: E402
 from actuo_msgs.srv import DeclareConfiguration  # noqa: E402
-from actuo.testing.fault_injectors import ServoFaultInjector  # noqa: E402
+from actuo.testing.rig import ServoRig  # noqa: E402
+
+RIG = os.environ.get("ACTUO_RIG", "examples/rigs/feetech_4port/rig.yaml")
 
 LATCHED = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                      durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -114,7 +122,7 @@ class Watch(Node):
 
 rclpy.init()
 w = Watch()
-sfi = ServoFaultInjector()
+sfi = ServoRig.from_file(RIG).injector
 try:
     t = w.spin_until(lambda: w.active == "gripper", 60)
     check(t is not None, "launch up: ros2_control runs gripper")

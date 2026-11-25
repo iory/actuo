@@ -221,7 +221,13 @@ On `examples/rigs/feetech_4port/modular` (2026-11-24,
 changed, the servicer switched in 47 ms, ros2_control followed 80 ms later and
 the new modules were up 70 ms after that; a declaration had the modules up
 0.26 s after the service call; a module pulled within a configuration went
-down alone and was back 0.9 s after it was plugged in.
+down alone and was back 0.9 s after it was plugged in. On
+`examples/rigs/krs_4port/modular` (2026-11-25, the same check with
+`ACTUO_RIG=examples/rigs/krs_4port/rig.yaml`) every check passed: the servicer
+switched in 51 ms, ros2_control followed 0.24 s later and the drill modules
+were up 0.03 s after that; a declaration had the modules up 0.38 s after the
+call; the hand module was back 0.16 s after its signal was connected. Detection came
+1.18 s after the ports changed, 1 s of it the rig's `signal_after_s`.
 
 With `moveit:=true`, `actuo_moveit_follower` runs MoveIt for the configuration
 that runs. move_group reads a robot model once, so on every switch it is
@@ -233,6 +239,8 @@ switch itself. `/actuo_moveit_follower/ready` names the configuration once it
 plans. On the same rig, planning succeeded for each configuration's groups
 under its own joint names after each switch, and failed for a group of the
 other configuration; move_group took 3.0-4.3 s to answer again after a switch.
+On the KRS rig (2026-11-25, three runs) the same held; move_group answered
+0.25-6.5 s after it was started.
 
 `firmware/actuo_uart_relay/` is the Arduino UNO R4 WiFi sketch that relays an
 RCB-4mini's serial port over UDP for the `kondo_rcb4_udp` transport.
