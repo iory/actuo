@@ -82,6 +82,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from actuo.core.contracts import (
     ActuatorCommand, ActuatorState, Bus, CapabilityError, Frame, OperatingMode)
+from actuo.core.registry import register_bus
 from actuo.core.diagnostics import DiagItem, DiagLevel
 
 from actuo.drivers.actuators.kondo_ics import (
@@ -202,6 +203,7 @@ DEFAULT_READING_CONFIRM = 3
 _SAME_COMMAND_RAD = 1e-4
 
 
+@register_bus("kondo_rcb4_bus")
 class KondoRcb4Bus(Bus):
     """Drives a set of :class:`KondoIcsActuator` through one RCB-4mini.
 

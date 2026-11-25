@@ -36,6 +36,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from actuo.core.contracts import (
     ActuatorCommand, ActuatorState, Bus, Frame, OperatingMode)
+from actuo.core.registry import register_bus
 from actuo.core.diagnostics import DiagItem, DiagLevel
 
 from actuo.drivers import dynamixel_protocol as dxl
@@ -46,6 +47,7 @@ from actuo.drivers.buses.presence import (
 MODEL_NUMBER_ADDRESS = 0
 
 
+@register_bus("dynamixel_bus")
 class DynamixelBus(Bus):
     """Drives a set of :class:`DynamixelActuator` on one serial line.
 

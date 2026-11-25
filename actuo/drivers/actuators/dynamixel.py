@@ -112,6 +112,8 @@ class DynamixelActuator(Actuator):
         model's raw units. ``None`` leaves whatever the servo already has.
     """
 
+    preferred_bus = "dynamixel_bus"
+
     def __init__(self, actuator_id: int, calibration: DynamixelCalibration,
                  model: DynamixelModel,
                  profile_velocity: Optional[int] = None) -> None:

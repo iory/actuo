@@ -150,6 +150,8 @@ class PythonCanTransport(Transport):
         specific options. Kept opaque so a new adapter needs no code change.
     """
 
+    default_bus = "can_bus"
+
     def __init__(
         self,
         interface: str,

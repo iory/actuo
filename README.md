@@ -30,8 +30,43 @@ rcb4 / feetech-cli / dynamixel-sdk / python-can     vendor libraries, usable alo
 - `actuo.cli.*` -- probe, calibration and emulator tools, installed as
   `actuo-<name>` commands
 
-Not done yet: the package layout (`actuo.drivers.*`) is not yet a designed
-public API; vendor adapters are not yet behind entry-point plugins.
+### Public API
+
+What code outside actuo may rely on:
+
+- the names `actuo` exports: `ActuoRobotInterface`, `ModularRobot`,
+  `Catalog`, `build_bus`, `load_document` (imported on first use, so
+  `import actuo` loads neither scikit-robot nor a vendor library);
+- `actuo.core`: the contracts and the plugin registry;
+- `actuo.safety` and `actuo.testing`;
+- the robot config format, and the `actuo-*` commands.
+
+Everything else under `actuo.drivers.*` is the implementation and may move.
+
+### Hardware from another package
+
+A package adds a transport, an actuator model, a sensor or a bus without
+editing actuo: it declares the class as an entry point, and a robot config
+names it like a shipped plugin (`plugin: my_servo`).
+
+```toml
+[project.entry-points."actuo.actuators"]
+my_servo = "my_package.servo:MyServo"
+[project.entry-points."actuo.buses"]
+my_bus = "my_package.bus:MyBus"
+```
+
+| kind | group | built from the config by |
+| --- | --- | --- |
+| transport | `actuo.transports` | its `bus.transport` keys as keyword arguments |
+| actuator | `actuo.actuators` | `from_config(spec, where)` classmethod (`spec`: the joint's `actuator:` block) |
+| sensor | `actuo.sensors` | `from_config(spec, where)` classmethod |
+| bus | `actuo.buses` | `from_config(transport, actuators, joint_names, spec, path)` classmethod (`spec`: the `bus:` block) |
+
+Without `bus.plugin`, the bus is the one every actuator names as its
+`preferred_bus`, or else the transport class's `default_bus`. A shipped
+plugin's name cannot be taken by an entry point. `tests/test_plugins.py`
+builds a robot from such a package.
 
 ## A robot without ROS
 
